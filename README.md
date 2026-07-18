@@ -4,7 +4,7 @@
 > 
 > *Note: For those in need of something a bit more sophisticated, I created a repo for the main dopt project in Golang over at [Ominous-Josef/dopt](https://github.com/Ominous-Josef/dopt).*
 
-`dopt` is a lightweight, manifest-driven package manager engine for standalone Linux software. It automates downloading, extracting, installing, and setting up desktop integration for applications distributed as tarballs.
+`dopt` is a lightweight, manifest-driven package manager engine that strictly installs standalone Linux software into the `/opt` directory. It automates downloading, extracting, installing to `/opt`, linking binaries to `/usr/local/bin`, and setting up desktop integration in `/usr/share/applications` for apps distributed as tarballs.
 
 ## Features
 - **JSON Manifest Driven:** Configuration is entirely externalized to simple JSON files.
