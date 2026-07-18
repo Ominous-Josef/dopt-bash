@@ -1,0 +1,14 @@
+{
+  "app_id": "com.example.app",
+  "name": "Example App",
+  "comment": "An example application managed by dopt",
+  "default_install_dir": "/opt/example-app",
+  "binary_pattern": "example-bin",
+  "binary_path": "bin/example-bin",
+  "cli_only": "false",
+  "symlink_as": "example",
+  "categories": "Utility;Development;",
+  "exec_flags": "--mode=gui",
+  "default_url_x64": "https://example.com/downloads/example-app-x86_64-linux.tar.gz",
+  "default_url_arm64": "https://example.com/downloads/example-app-aarch64-linux.tar.gz"
+}
