@@ -1,5 +1,9 @@
 # dopt - Dynamic Optional Package Manager
 
+> **The Backstory:** I use Fedora, and most of the standalone apps I use come packaged as `.tar.gz` archives. This means that whenever there is an update, I have to manually go through the entire extraction and installation process all over again, which gets frustrating. I made this script to help me install and update those apps automatically. I don't know if anyone else has this exact issue, but if you do, I hope this helps you!
+> 
+> *Note: For those in need of something a bit more sophisticated, I created a repo for the main dopt project in Golang over at [Ominous-Josef/dopt](https://github.com/Ominous-Josef/dopt).*
+
 `dopt` is a lightweight, manifest-driven package manager engine for standalone Linux software. It automates downloading, extracting, installing, and setting up desktop integration for applications distributed as tarballs.
 
 ## Features
@@ -24,7 +28,7 @@ sudo dnf install jq curl
 
 ### Syntax
 ```bash
-sudo ./dopt.sh -m <manifest.json> [options]
+sudo ./dopt.sh [options]
 ```
 
 > [!WARNING]
@@ -32,8 +36,11 @@ sudo ./dopt.sh -m <manifest.json> [options]
 
 ### Options
 
-**Required:**
+**Manifest (Optional):**
 - `-m, --manifest <json>`: The path to the application manifest recipe.
+- `-a, --app-id <id>`: Provide the App ID directly if running without a manifest.
+
+If no manifest is provided, `dopt` will launch an **Interactive Wizard** to guide you through the setup.
 
 **Deployment Targets (Choose one):**
 - `-d, --download`: Download the archive using the manifest's default server endpoint.
@@ -84,8 +91,18 @@ The manifest is a JSON file that defines the application parameters. See `exampl
 | `default_url_x64` | String | The URL to download the `x86_64` Linux tarball. |
 | `default_url_arm64` | String | The URL to download the `aarch64` Linux tarball. |
 
+## Disclaimer & Security Responsibility
+
+> [!CAUTION]
+> **No Cryptographic Verification:** `dopt` is a deployment engine. It **does not** cryptographically verify signatures or the safety of the payloads it installs. 
+> 
+> Because `dopt` runs with `sudo` privileges to install system-wide applications:
+> - You must 100% trust the source `URL` you provide.
+> - You are responsible for verifying the integrity of any `manifest.json` file you download from the internet.
+> - You are responsible for verifying the integrity of local `.tar.gz` archives before passing them to `dopt`.
+
 ## Limitations & Future Work
 
 - **Archive format:** Currently, `dopt` strictly expects standard `tar.gz` (`.tar.gz`) archives.
 - **Hardcoded paths:** System paths for bins (`/usr/local/bin`) and desktop files (`/usr/share/applications`) are hardcoded.
-- **Deletions:** The update process forcefully deletes the existing `INSTALL_DIR` before copying the new framework. Misconfigurations could be dangerous. Use with caution!
+- **Deletions:** The update process deletes the existing `INSTALL_DIR` before copying the new framework. While safeguards exist to protect core OS directories, misconfigurations could still be dangerous. Use with caution!
