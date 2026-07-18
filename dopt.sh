@@ -24,8 +24,9 @@ show_help() {
     echo "dopt - Dynamic Optional Package Manager"
     echo "Usage: sudo ./dopt -m <recipe.json> [options]"
     echo ""
-    echo "Required:"
+    echo "Manifest (Optional):"
     echo "  -m, --manifest <json>   The application manifest recipe configuration file"
+    echo "  -a, --app-id <id>       Provide App ID directly if not using a manifest"
     echo ""
     echo "Deployment Targets (Choose one):"
     echo "  -d, --download          Download using the manifest's default server endpoint"
@@ -49,6 +50,7 @@ fi
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -m|--manifest) MANIFEST="$2"; shift 2 ;;
+        -a|--app-id)   APP_ID_CLI="$2"; shift 2 ;;
         -d|--download) DOWNLOAD=true; shift ;;
         -c|--cleanup)  CLEANUP=true; shift ;;
         -i|--install)  FORCE_INSTALL=true; shift ;;
@@ -60,8 +62,8 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-if [[ -z "$MANIFEST" || ! -f "$MANIFEST" ]]; then
-    echo "[-] Error: A valid application manifest file path is required (-m / --manifest)." >&2
+if [[ -n "$MANIFEST" && ! -f "$MANIFEST" ]]; then
+    echo "[-] Error: Manifest file not found: $MANIFEST" >&2
     exit 1
 fi
 
@@ -75,16 +77,45 @@ REAL_USER="${SUDO_USER:-$USER}"
 USER_HOME=$(eval echo "~$REAL_USER")
 
 # 4. Ingest and extract values out of the Manifest Recipe
-APP_ID=$(jq -r '.app_id' "$MANIFEST")
-APP_NAME=$(jq -r '.name' "$MANIFEST")
-APP_COMMENT=$(jq -r '.comment' "$MANIFEST")
-DEFAULT_INSTALL_DIR=$(jq -r '.default_install_dir' "$MANIFEST")
-BINARY_PATTERN=$(jq -r '.binary_pattern' "$MANIFEST")
-BINARY_PATH=$(jq -r '.binary_path' "$MANIFEST")
-CLI_ONLY=$(jq -r '.cli_only' "$MANIFEST")
-SYMLINK_NAME=$(jq -r '.symlink_as' "$MANIFEST")
-APP_CATEGORIES=$(jq -r '.categories' "$MANIFEST")
-EXEC_FLAGS=$(jq -r '.exec_flags' "$MANIFEST")
+if [[ -n "$MANIFEST" && -f "$MANIFEST" ]]; then
+    APP_ID=$(jq -r '.app_id' "$MANIFEST")
+    APP_NAME=$(jq -r '.name' "$MANIFEST")
+    APP_COMMENT=$(jq -r '.comment' "$MANIFEST")
+    DEFAULT_INSTALL_DIR=$(jq -r '.default_install_dir' "$MANIFEST")
+    BINARY_PATTERN=$(jq -r '.binary_pattern' "$MANIFEST")
+    BINARY_PATH=$(jq -r '.binary_path' "$MANIFEST")
+    CLI_ONLY=$(jq -r '.cli_only' "$MANIFEST")
+    SYMLINK_NAME=$(jq -r '.symlink_as' "$MANIFEST")
+    APP_CATEGORIES=$(jq -r '.categories' "$MANIFEST")
+    EXEC_FLAGS=$(jq -r '.exec_flags' "$MANIFEST")
+else
+    echo "[*] No manifest provided. Using interactive setup..."
+    APP_ID="${APP_ID_CLI:-}"
+    if [[ -z "$APP_ID" ]]; then
+        read -r -p "[?] Enter App ID (e.g. com.example.app): " APP_ID
+    fi
+    [[ -z "$APP_ID" ]] && { echo "[-] Error: App ID is required."; exit 1; }
+    
+    read -r -p "[?] Enter Application Name [$APP_ID]: " APP_NAME
+    APP_NAME=${APP_NAME:-$APP_ID}
+    
+    read -r -p "[?] Enter executable symlink name [$APP_ID]: " SYMLINK_NAME
+    SYMLINK_NAME=${SYMLINK_NAME:-$APP_ID}
+    
+    read -r -p "[?] Is this a CLI-only application? [y/N]: " cli_ans
+    if [[ "${cli_ans,,}" =~ ^(yes|y) ]]; then
+        CLI_ONLY="true"
+    else
+        CLI_ONLY="false"
+    fi
+    
+    APP_COMMENT=""
+    DEFAULT_INSTALL_DIR="/opt/$APP_ID"
+    BINARY_PATTERN=""
+    BINARY_PATH=""
+    APP_CATEGORIES="Utility;"
+    EXEC_FLAGS=""
+fi
 
 BIN_LINK="$BIN_LINK_DIR/$SYMLINK_NAME"
 INSTALL_DIR=""
@@ -134,12 +165,14 @@ esac
 if [ "$DOWNLOAD" = true ]; then
     if [[ -n "$CUSTOM_URL" ]]; then
         DOWNLOAD_URL="$CUSTOM_URL"
-    else
+    elif [[ -n "$MANIFEST" && -f "$MANIFEST" ]]; then
         DOWNLOAD_URL=$(jq -r --arg key "$ARCH_KEY" '.[$key]' "$MANIFEST")
+    else
+        DOWNLOAD_URL=""
     fi
     
     if [[ -z "$DOWNLOAD_URL" || "$DOWNLOAD_URL" == "null" ]]; then
-        echo "[-] Error: No default mirror link provided for this architecture layout in manifest." >&2
+        echo "[-] Error: No download URL provided. Use -u <url> if not using a manifest." >&2
         exit 1
     fi
     
@@ -196,6 +229,14 @@ if [[ -n "$LOCAL_BIN" && -f "$LOCAL_BIN" ]]; then
 fi
 
 # 8. File Erasure and Allocation
+SAFE_DIRS=("/" "/usr" "/bin" "/etc" "/var" "/opt" "/home" "/usr/local" "/usr/share" "/usr/local/bin")
+for safe_dir in "${SAFE_DIRS[@]}"; do
+    if [[ "$INSTALL_DIR" == "$safe_dir" ]]; then
+        echo "[-] CRITICAL: Safety abort. Attempted to delete system directory: $INSTALL_DIR" >&2
+        exit 1
+    fi
+done
+
 echo "[*] Deep cleaning legacy directory mappings to clear stale libraries..."
 rm -rf "$INSTALL_DIR"
 mkdir -p "$INSTALL_DIR"
