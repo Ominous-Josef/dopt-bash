@@ -76,6 +76,24 @@ sudo ./dopt.sh -m examples/example-manifest.json -f ~/Downloads/my-app-latest.ta
 sudo ./dopt.sh -m examples/example-manifest.json -p ~/Downloads -c
 ```
 
+**4. Interactive Install (No Manifest):**
+If you don't have a manifest, you can just point `dopt` directly at a tarball. It will launch an interactive setup wizard to ask for the App ID and Name.
+```bash
+sudo ./dopt.sh -f ~/Downloads/some-new-app-linux-x64.tar.gz
+```
+
+**5. Scripted Install (No Manifest):**
+Bypass the interactive wizard by providing the App ID directly via the `-a` flag.
+```bash
+sudo ./dopt.sh -a com.some.app -f ~/Downloads/some-new-app-linux-x64.tar.gz
+```
+
+**6. Download from a Direct URL (No Manifest):**
+You can also download and install straight from a direct link without needing a manifest.
+```bash
+sudo ./dopt.sh -a com.some.app -u https://example.com/downloads/some-app-linux.tar.gz
+```
+
 ## The Manifest File (`recipe.json`)
 
 The manifest is a JSON file that defines the application parameters. See `examples/example-manifest.json` for a full template.
