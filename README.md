@@ -53,6 +53,12 @@ If no manifest is provided, `dopt` will launch an **Interactive Wizard** to guid
 - `-i, --install`: Force a fresh installation, bypassing user prompts if no existing version is found.
 - `-h, --help`: Show the help menu.
 
+### Updating Applications
+
+Because `dopt` does not maintain a complex internal database, updating an application is functionally identical to installing it. The golden rule is: **Same App ID = Overwrite / Update**.
+
+When you run `dopt` with a new `.tar.gz` payload, as long as the `app_id` matches the existing installation (either defined in the JSON manifest, passed via `-a`, or typed into the interactive prompt), `dopt` will safely clear the old `/opt/<app-id>` directory and install the new version in its place. No special update flags are required!
+
 ### Examples
 
 **1. Install/Update from the internet:**
