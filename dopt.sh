@@ -226,12 +226,12 @@ if [[ -n "$LOCAL_BIN" && -f "$LOCAL_BIN" ]]; then
     # Escape special regex characters to prevent regex injection attacks via pgrep/pkill
     ESCAPED_BIN_NAME=$(echo "$RUNNING_BIN_NAME" | sed 's/[^a-zA-Z0-9_-]/\\&/g')
     
-    if pgrep -u "$REAL_USER" -x "$ESCAPED_BIN_NAME" > /dev/null 2>&1; then
+    if pgrep -u "$REAL_USER" -f "$ESCAPED_BIN_NAME" > /dev/null 2>&1; then
         echo -e "\n[!] Active Process Block: $APP_NAME is currently running."
         read -r -p "[?] Kill process, deploy workspace matrix, and auto-restart? [Y/n]: " run_res
         if [[ ! "${run_res,,}" =~ ^(no|n) ]]; then
-            pkill -u "$REAL_USER" -x "$ESCAPED_BIN_NAME" || true; sleep 1.5
-            pkill -9 -u "$REAL_USER" -x "$ESCAPED_BIN_NAME" || true
+            pkill -u "$REAL_USER" -f "$ESCAPED_BIN_NAME" || true; sleep 1.5
+            pkill -9 -u "$REAL_USER" -f "$ESCAPED_BIN_NAME" || true
             if [[ "$CLI_ONLY" != "true" ]]; then RESTART_REQD=true; fi
         else
             echo "[-] Update cycle canceled to keep app active."
