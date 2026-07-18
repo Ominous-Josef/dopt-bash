@@ -17,7 +17,7 @@
 `dopt` relies on standard Unix utilities, but specifically requires:
 - `bash` (4.0+)
 - `curl` (for network downloads)
-- `jq` (for parsing the JSON manifest)
+- `jq` (**Only required** if using a JSON manifest)
 
 ```bash
 # Example prerequisite installation (Fedora/RHEL)

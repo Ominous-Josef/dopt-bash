@@ -40,13 +40,8 @@ show_help() {
     echo "  -h, --help              Show this help menu"
 }
 
-# 1. Verify JSON parser dependencies exist on host
-if ! command -v jq >/dev/null 2>&1; then
-    echo "[-] Error: 'jq' utility is missing. Please run: sudo dnf install jq" >&2
-    exit 1
-fi
 
-# 2. Parse command-line inputs
+# 1. Parse command-line inputs
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -m|--manifest) MANIFEST="$2"; shift 2 ;;
@@ -62,12 +57,20 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-if [[ -n "$MANIFEST" && ! -f "$MANIFEST" ]]; then
-    echo "[-] Error: Manifest file not found: $MANIFEST" >&2
-    exit 1
+if [[ -n "$MANIFEST" ]]; then
+    # Verify JSON parser dependencies exist on host
+    if ! command -v jq >/dev/null 2>&1; then
+        echo "[-] Error: 'jq' utility is required when using a manifest. Please run: sudo dnf install jq" >&2
+        exit 1
+    fi
+
+    if [[ ! -f "$MANIFEST" ]]; then
+        echo "[-] Error: Manifest file not found: $MANIFEST" >&2
+        exit 1
+    fi
 fi
 
-# 3. Secure environment validation hooks
+# 2. Secure environment validation hooks
 if [[ $EUID -ne 0 ]]; then
    echo "[-] Error: dopt engine modifications require root context. Re-run command using sudo." >&2
    exit 1
@@ -76,7 +79,7 @@ fi
 REAL_USER="${SUDO_USER:-$USER}"
 USER_HOME=$(eval echo "~$REAL_USER")
 
-# 4. Ingest and extract values out of the Manifest Recipe
+# 3. Ingest and extract values out of the Manifest Recipe
 if [[ -n "$MANIFEST" && -f "$MANIFEST" ]]; then
     APP_ID=$(jq -r '.app_id' "$MANIFEST")
     APP_NAME=$(jq -r '.name' "$MANIFEST")
@@ -120,7 +123,7 @@ fi
 BIN_LINK="$BIN_LINK_DIR/$SYMLINK_NAME"
 INSTALL_DIR=""
 
-# 5. Resolve active system path bindings
+# 4. Resolve active system path bindings
 echo "[*] Auditing environment path structures for $APP_NAME..."
 EXISTING_BIN=$(sudo -u "$REAL_USER" which "$SYMLINK_NAME" 2>/dev/null || true)
 
@@ -151,7 +154,7 @@ else
     fi
 fi
 
-# 6. Target Architecture Resolution and Source Acquisition
+# 5. Target Architecture Resolution and Source Acquisition
 TMP_DIR=$(mktemp -d -t dopt-workspace-XXXXXXXX)
 trap 'rm -rf "$TMP_DIR"' EXIT
 
@@ -196,7 +199,7 @@ else
     TARBALL="$LATEST_TARBALL"
 fi
 
-# 7. Unpack and Parse Sandbox Interior
+# 6. Unpack and Parse Sandbox Interior
 echo "[*] Extracting execution code assets..."
 tar -xzf "$TARBALL" -C "$TMP_DIR"
 
@@ -228,7 +231,7 @@ if [[ -n "$LOCAL_BIN" && -f "$LOCAL_BIN" ]]; then
     fi
 fi
 
-# 8. File Erasure and Allocation
+# 7. File Erasure and Allocation
 SAFE_DIRS=("/" "/usr" "/bin" "/etc" "/var" "/opt" "/home" "/usr/local" "/usr/share" "/usr/local/bin")
 for safe_dir in "${SAFE_DIRS[@]}"; do
     if [[ "$INSTALL_DIR" == "$safe_dir" ]]; then
@@ -259,7 +262,7 @@ fi
 chmod +x "$REAL_BINARY"
 ln -sf "$REAL_BINARY" "$BIN_LINK"
 
-# 9. Dynamic Linux Desktop Icon Integration Layout
+# 8. Dynamic Linux Desktop Icon Integration Layout
 if [[ "$CLI_ONLY" != "true" ]]; then
     echo "[*] Scanning workspace assets for Application Desktop Graphics..."
     ICON_PATH=$(find "$INSTALL_DIR" -mindepth 1 -maxdepth 3 -type f \( -name "icon.png" -o -name "icon.svg" -o -name "${APP_ID}.png" -o -name "${APP_ID}.svg" \) | head -n 1 || true)
@@ -288,7 +291,7 @@ else
     echo "[*] App designated as CLI-only. Bypassing desktop shortcut layer."
 fi
 
-# 10. Post-Execution cleanup hooks
+# 9. Post-Execution cleanup hooks
 if [ "$DOWNLOAD" = true ]; then
     if [ "$CLEANUP" = true ]; then
         echo "[*] Removing compressed remote runtime package artifacts..."
@@ -302,7 +305,7 @@ if [ "$DOWNLOAD" = true ]; then
     fi
 fi
 
-# 11. Environment variables reload check for UI relaunch mapping
+# 10. Environment variables reload check for UI relaunch mapping
 if [ "$RESTART_REQD" = true ]; then
     echo "[*] Relaunching application window environment inside active desktop framework layer..."
     sudo -u "$REAL_USER" env \
