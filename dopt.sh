@@ -77,7 +77,7 @@ if [[ $EUID -ne 0 ]]; then
 fi
 
 REAL_USER="${SUDO_USER:-$USER}"
-USER_HOME=$(eval echo "~$REAL_USER")
+USER_HOME=$(getent passwd "$REAL_USER" | cut -d: -f6)
 
 # 3. Ingest and extract values out of the Manifest Recipe
 if [[ -n "$MANIFEST" && -f "$MANIFEST" ]]; then
@@ -118,6 +118,12 @@ else
     BINARY_PATH=""
     APP_CATEGORIES="Utility;"
     EXEC_FLAGS=""
+fi
+
+# Input Sanitization
+if [[ "$APP_ID" == *"/"* || "$APP_ID" == *".."* || "$SYMLINK_NAME" == *"/"* || "$SYMLINK_NAME" == *".."* ]]; then
+    echo "[-] CRITICAL: Security abort. APP_ID and SYMLINK_NAME cannot contain path traversal characters (/, ..)." >&2
+    exit 1
 fi
 
 BIN_LINK="$BIN_LINK_DIR/$SYMLINK_NAME"
@@ -192,7 +198,7 @@ elif [[ -n "$FILE_PATH" ]]; then
 else
     [[ "$SEARCH_DIR" == "~"* ]] && SEARCH_DIR="${SEARCH_DIR/\~/$USER_HOME}"
     echo "[*] Scanning directories under '$SEARCH_DIR' for updates..."
-    LATEST_TARBALL=$(ls -t "$SEARCH_DIR"/*"${APP_ID}"*.tar.gz 2>/dev/null | head -n 1 || true)
+    LATEST_TARBALL=$(ls -t -- "$SEARCH_DIR"/*"${APP_ID}"*.tar.gz 2>/dev/null | head -n 1 || true)
     if [[ -z "$LATEST_TARBALL" ]]; then
         echo "[-] Archive fault: No deployment packages matching *${APP_ID}*.tar.gz found." >&2; exit 1
     fi
@@ -217,12 +223,15 @@ fi
 
 if [[ -n "$LOCAL_BIN" && -f "$LOCAL_BIN" ]]; then
     RUNNING_BIN_NAME=$(basename "$LOCAL_BIN")
-    if pgrep -u "$REAL_USER" -f "$RUNNING_BIN_NAME" > /dev/null 2>&1; then
+    # Escape special regex characters to prevent regex injection attacks via pgrep/pkill
+    ESCAPED_BIN_NAME=$(echo "$RUNNING_BIN_NAME" | sed 's/[^a-zA-Z0-9_-]/\\&/g')
+    
+    if pgrep -u "$REAL_USER" -x "$ESCAPED_BIN_NAME" > /dev/null 2>&1; then
         echo -e "\n[!] Active Process Block: $APP_NAME is currently running."
         read -r -p "[?] Kill process, deploy workspace matrix, and auto-restart? [Y/n]: " run_res
         if [[ ! "${run_res,,}" =~ ^(no|n) ]]; then
-            pkill -u "$REAL_USER" -f "$RUNNING_BIN_NAME" || true; sleep 1.5
-            pkill -9 -u "$REAL_USER" -f "$RUNNING_BIN_NAME" || true
+            pkill -u "$REAL_USER" -x "$ESCAPED_BIN_NAME" || true; sleep 1.5
+            pkill -9 -u "$REAL_USER" -x "$ESCAPED_BIN_NAME" || true
             if [[ "$CLI_ONLY" != "true" ]]; then RESTART_REQD=true; fi
         else
             echo "[-] Update cycle canceled to keep app active."
@@ -232,6 +241,7 @@ if [[ -n "$LOCAL_BIN" && -f "$LOCAL_BIN" ]]; then
 fi
 
 # 7. File Erasure and Allocation
+INSTALL_DIR=$(readlink -m "$INSTALL_DIR")
 SAFE_DIRS=("/" "/usr" "/bin" "/etc" "/var" "/opt" "/home" "/usr/local" "/usr/share" "/usr/local/bin")
 for safe_dir in "${SAFE_DIRS[@]}"; do
     if [[ "$INSTALL_DIR" == "$safe_dir" ]]; then
@@ -241,7 +251,7 @@ for safe_dir in "${SAFE_DIRS[@]}"; do
 done
 
 echo "[*] Deep cleaning legacy directory mappings to clear stale libraries..."
-rm -rf "$INSTALL_DIR"
+rm -rf -- "$INSTALL_DIR"
 mkdir -p "$INSTALL_DIR"
 
 echo "[*] Synchronizing updated frameworks into installation path..."
@@ -299,8 +309,8 @@ if [ "$DOWNLOAD" = true ]; then
         URL_FILE_NAME=$(basename "$DOWNLOAD_URL" | sed 's/%20/ /g')
         [[ "$URL_FILE_NAME" == "download"* || -z "$URL_FILE_NAME" ]] && URL_FILE_NAME="${APP_ID}-linux.tar.gz"
         OUTPUT_DEST="$(pwd)/$URL_FILE_NAME"
-        mv -f "$TARBALL" "$OUTPUT_DEST"
-        [[ -n "${SUDO_USER:-}" ]] && chown "${SUDO_USER}:" "$OUTPUT_DEST"
+        mv -f -- "$TARBALL" "$OUTPUT_DEST"
+        [[ -n "${SUDO_USER:-}" ]] && chown -- "${SUDO_USER}:" "$OUTPUT_DEST"
         echo "[i] Local installation backup kept at: $OUTPUT_DEST"
     fi
 fi
