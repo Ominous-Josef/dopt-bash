@@ -87,6 +87,7 @@ if [[ -n "$MANIFEST" && -f "$MANIFEST" ]]; then
     DEFAULT_INSTALL_DIR=$(jq -r '.default_install_dir' "$MANIFEST")
     BINARY_PATTERN=$(jq -r '.binary_pattern' "$MANIFEST")
     BINARY_PATH=$(jq -r '.binary_path' "$MANIFEST")
+    ICON_PATH_MANIFEST=$(jq -r '.icon_path' "$MANIFEST")
     CLI_ONLY=$(jq -r '.cli_only' "$MANIFEST")
     SYMLINK_NAME=$(jq -r '.symlink_as' "$MANIFEST")
     APP_CATEGORIES=$(jq -r '.categories' "$MANIFEST")
@@ -117,6 +118,7 @@ else
     read -r -p "[?] Enter target binary name to link [$SYMLINK_NAME]: " BINARY_PATTERN
     BINARY_PATTERN=${BINARY_PATTERN:-$SYMLINK_NAME}
     BINARY_PATH=""
+    read -r -p "[?] Enter icon file path/name (leave blank to auto-detect): " ICON_PATH_MANIFEST
     APP_CATEGORIES="Utility;"
     EXEC_FLAGS=""
 fi
@@ -276,10 +278,31 @@ ln -sf "$REAL_BINARY" "$BIN_LINK"
 # 8. Dynamic Linux Desktop Icon Integration Layout
 if [[ "$CLI_ONLY" != "true" ]]; then
     echo "[*] Scanning workspace assets for Application Desktop Graphics..."
-    ICON_PATH=$(find "$INSTALL_DIR" -mindepth 1 -maxdepth 3 -type f \( -name "icon.png" -o -name "icon.svg" -o -name "${APP_ID}.png" -o -name "${APP_ID}.svg" \) | head -n 1 || true)
+    ICON_PATH=""
+    
+    if [[ -n "${ICON_PATH_MANIFEST:-}" && "$ICON_PATH_MANIFEST" != "null" ]]; then
+        if [[ -f "$INSTALL_DIR/$ICON_PATH_MANIFEST" ]]; then
+            ICON_PATH="$INSTALL_DIR/$ICON_PATH_MANIFEST"
+        else
+            ICON_PATH=$(find "$INSTALL_DIR" -type f -iname "$ICON_PATH_MANIFEST" | head -n 1 || true)
+        fi
+    fi
+
+    if [[ -z "$ICON_PATH" ]]; then
+        ICON_PATH=$(find "$INSTALL_DIR" -mindepth 1 -maxdepth 8 -type f \( -name "icon.png" -o -name "icon.svg" -o -name "${APP_ID}.png" -o -name "${APP_ID}.svg" -o -name "${SYMLINK_NAME}.png" -o -name "${SYMLINK_NAME}.svg" \) | head -n 1 || true)
+    fi
     
     if [[ -z "$ICON_PATH" ]]; then
-        ICON_PATH=$(find "$INSTALL_DIR" -maxdepth 2 -type f \( -name "*.png" -o -name "*.svg" \) | head -n 1 || true)
+        # Define noisy directories to ignore during fallback search
+        IGNORE_ICON_DIRS=("node_modules" ".*" "locales" "test*")
+        
+        # Dynamically build the find exclusion arguments
+        FIND_PRUNE_ARGS=("-name" "${IGNORE_ICON_DIRS[0]}")
+        for dir in "${IGNORE_ICON_DIRS[@]:1}"; do
+            FIND_PRUNE_ARGS+=("-o" "-name" "$dir")
+        done
+
+        ICON_PATH=$(find "$INSTALL_DIR" -maxdepth 5 -type d \( "${FIND_PRUNE_ARGS[@]}" \) -prune -o -type f \( -name "*.png" -o -name "*.svg" \) -print | head -n 1 || true)
     fi
 
     DESKTOP_FILE="$DESKTOP_DIR/${APP_ID}.desktop"
