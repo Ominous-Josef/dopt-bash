@@ -114,7 +114,8 @@ else
     
     APP_COMMENT=""
     DEFAULT_INSTALL_DIR="/opt/$APP_ID"
-    BINARY_PATTERN=""
+    read -r -p "[?] Enter target binary name to link [$SYMLINK_NAME]: " BINARY_PATTERN
+    BINARY_PATTERN=${BINARY_PATTERN:-$SYMLINK_NAME}
     BINARY_PATH=""
     APP_CATEGORIES="Utility;"
     EXEC_FLAGS=""
@@ -218,7 +219,7 @@ if [[ -n "$BINARY_PATH" && "$BINARY_PATH" != "null" ]]; then
     LOCAL_BIN="$EXTRACTED_FOLDER/$BINARY_PATH"
 else
     LOCAL_BIN=$(find "$EXTRACTED_FOLDER" -maxdepth 1 -type f -iname "$BINARY_PATTERN" | head -n 1)
-    [[ -z "$LOCAL_BIN" ]] && LOCAL_BIN=$(find "$EXTRACTED_FOLDER" -maxdepth 1 -type f -executable | head -n 1)
+    [[ -z "$LOCAL_BIN" ]] && LOCAL_BIN=$(find "$EXTRACTED_FOLDER" -maxdepth 1 -type f -executable ! -name "chrome-sandbox" ! -name "crashpad_handler" | head -n 1)
 fi
 
 if [[ -n "$LOCAL_BIN" && -f "$LOCAL_BIN" ]]; then
@@ -261,7 +262,7 @@ if [[ -n "$BINARY_PATH" && "$BINARY_PATH" != "null" ]]; then
     REAL_BINARY="$INSTALL_DIR/$BINARY_PATH"
 else
     REAL_BINARY=$(find "$INSTALL_DIR" -maxdepth 1 -type f -iname "$BINARY_PATTERN" | head -n 1)
-    [[ -z "$REAL_BINARY" ]] && REAL_BINARY=$(find "$INSTALL_DIR" -maxdepth 1 -type f -executable | head -n 1)
+    [[ -z "$REAL_BINARY" ]] && REAL_BINARY=$(find "$INSTALL_DIR" -maxdepth 1 -type f -executable ! -name "chrome-sandbox" ! -name "crashpad_handler" | head -n 1)
 fi
 
 if [[ -z "$REAL_BINARY" || ! -f "$REAL_BINARY" ]]; then
