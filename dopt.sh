@@ -86,7 +86,19 @@ else
     APP_ID="${APP_ID_CLI:-}"
     if [[ -z "$APP_ID" ]]; then
         echo "[*] No manifest provided. Using interactive setup..."
-        read -r -p "[?] Enter App ID (e.g. com.example.app): " APP_ID
+        echo "[i] Tip: Type '?' to see your currently installed applications."
+        while true; do
+            read -r -p "[?] Enter App ID (e.g. com.example.app): " APP_ID
+            if [[ "$APP_ID" == "?" ]]; then
+                echo -e "\n--- Installed Applications in /opt ---"
+                for dir in /opt/*/; do
+                    [[ -d "$dir" ]] && echo "- $(basename "$dir")"
+                done
+                echo -e "--------------------------------------\n"
+            else
+                break
+            fi
+        done
     fi
     [[ -z "$APP_ID" ]] && { echo "[-] Error: App ID is required."; exit 1; }
 fi
@@ -308,6 +320,31 @@ if [[ -n "$LOCAL_BIN" && -f "$LOCAL_BIN" ]]; then
                 if [[ "$CLI_ONLY" != "true" ]]; then RESTART_REQD=true; fi
             else
                 echo "[-] Update cycle canceled to keep app active."
+                RESUME_FILE=""
+                if [ "$DOWNLOAD" = true ]; then
+                    if [ "$CLEANUP" = false ]; then
+                        URL_FILE_NAME=$(basename "$DOWNLOAD_URL" | sed 's/%20/ /g')
+                        [[ "$URL_FILE_NAME" == "download"* || -z "$URL_FILE_NAME" ]] && URL_FILE_NAME="${APP_ID}-linux.tar.gz"
+                        OUTPUT_DEST="$(pwd)/$URL_FILE_NAME"
+                        mv -f -- "$TARBALL" "$OUTPUT_DEST"
+                        [[ -n "${SUDO_USER:-}" ]] && chown -- "${SUDO_USER}:" "$OUTPUT_DEST"
+                        echo "[i] The downloaded update archive has been preserved at: $OUTPUT_DEST"
+                        RESUME_FILE="$OUTPUT_DEST"
+                    fi
+                elif [[ -n "${FILE_PATH:-}" ]]; then
+                    RESUME_FILE="$FILE_PATH"
+                elif [[ -n "${TARBALL:-}" ]]; then
+                    RESUME_FILE="$TARBALL"
+                fi
+                
+                if [[ -n "$RESUME_FILE" ]]; then
+                    echo -e "\n[!] To apply this update later without re-downloading, run:"
+                    if [[ -n "$MANIFEST" && -f "$MANIFEST" ]]; then
+                        echo "    sudo ./dopt.sh -m \"$MANIFEST\" -f \"$RESUME_FILE\""
+                    else
+                        echo "    sudo ./dopt.sh -a \"$APP_ID\" -f \"$RESUME_FILE\""
+                    fi
+                fi
                 exit 0
             fi
         fi
@@ -341,6 +378,14 @@ fi
 if [[ -z "$REAL_BINARY" || ! -f "$REAL_BINARY" ]]; then
     echo "[-] Critical Error: Execution file vector verification failed inside installation target." >&2
     exit 1
+fi
+
+if [[ -n "${DEF_SYMLINK_NAME:-}" && "$DEF_SYMLINK_NAME" != "$SYMLINK_NAME" ]]; then
+    OLD_BIN_LINK="$BIN_LINK_DIR/$DEF_SYMLINK_NAME"
+    if [[ -L "$OLD_BIN_LINK" || -f "$OLD_BIN_LINK" ]]; then
+        echo "[*] Cleaning up legacy symlink at $OLD_BIN_LINK..."
+        rm -f "$OLD_BIN_LINK"
+    fi
 fi
 
 chmod +x "$REAL_BINARY"

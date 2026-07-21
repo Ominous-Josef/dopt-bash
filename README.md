@@ -11,7 +11,9 @@
 - **Architecture Awareness:** Automatically pulls the correct binary (x86_64 vs aarch64) based on the host architecture.
 - **Desktop Integration:** Automatically creates `.desktop` files for GUI applications and binds them to icons found within the package.
 - **Process Management:** Detects if the target application is running, safely terminates it before upgrading, and prompts to launch the app after deployment.
+- **Graceful Aborts:** Canceling an update preserves the downloaded payload and generates a fast-resume command.
 - **Smart Updates:** When updating interactively, `dopt` reverse-engineers previous installations to auto-populate the setup wizard.
+- **App Discovery:** If you forgot the App ID for an update, type `?` in the wizard to list all packages in your `/opt` folder.
 - **Flexible Deployments:** Install straight from a network URL, from a local archive file, or let `dopt` scan a directory for the latest matching version.
 
 ## Prerequisites
@@ -60,7 +62,9 @@ Because `dopt` does not maintain a complex internal database, updating an applic
 
 When you run `dopt` with a new `.tar.gz` payload, as long as the `app_id` matches the existing installation (either defined in the JSON manifest, passed via `-a`, or typed into the interactive prompt), `dopt` will safely clear the old `/opt/<app-id>` directory and install the new version in its place. No special update flags are required!
 
-If you are updating via the **Interactive Wizard**, `dopt` will intelligently scan your system for existing `.desktop` files and `/usr/local/bin` symlinks belonging to that App ID, and auto-populate all wizard prompts for a frictionless update experience.
+If you are updating via the **Interactive Wizard**, `dopt` will intelligently scan your system for existing `.desktop` files and `/usr/local/bin` symlinks belonging to that App ID, and auto-populate all wizard prompts for a frictionless update experience. If you forgot the App ID you used previously, simply type `?` at the first prompt to see a list of all packages in your `/opt` folder.
+
+Additionally, if you ever abort an update (e.g., to save your work in an actively running app), `dopt` will preserve the downloaded payload in your current directory and provide an exact CLI command to instantly resume the update later without re-downloading.
 
 ### Examples
 
