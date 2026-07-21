@@ -10,7 +10,8 @@
 - **JSON Manifest Driven:** Configuration is entirely externalized to simple JSON files.
 - **Architecture Awareness:** Automatically pulls the correct binary (x86_64 vs aarch64) based on the host architecture.
 - **Desktop Integration:** Automatically creates `.desktop` files for GUI applications and binds them to icons found within the package.
-- **Process Management:** Detects if the target application is running, safely terminates it before upgrading, and can restart it automatically afterwards.
+- **Process Management:** Detects if the target application is running, safely terminates it before upgrading, and prompts to launch the app after deployment.
+- **Smart Updates:** When updating interactively, `dopt` reverse-engineers previous installations to auto-populate the setup wizard.
 - **Flexible Deployments:** Install straight from a network URL, from a local archive file, or let `dopt` scan a directory for the latest matching version.
 
 ## Prerequisites
@@ -58,6 +59,8 @@ If no manifest is provided, `dopt` will launch an **Interactive Wizard** to guid
 Because `dopt` does not maintain a complex internal database, updating an application is functionally identical to installing it. The golden rule is: **Same App ID = Overwrite / Update**.
 
 When you run `dopt` with a new `.tar.gz` payload, as long as the `app_id` matches the existing installation (either defined in the JSON manifest, passed via `-a`, or typed into the interactive prompt), `dopt` will safely clear the old `/opt/<app-id>` directory and install the new version in its place. No special update flags are required!
+
+If you are updating via the **Interactive Wizard**, `dopt` will intelligently scan your system for existing `.desktop` files and `/usr/local/bin` symlinks belonging to that App ID, and auto-populate all wizard prompts for a frictionless update experience.
 
 ### Examples
 
@@ -108,6 +111,7 @@ The manifest is a JSON file that defines the application parameters. See `exampl
 | `default_install_dir` | String | Where the application should be placed if it isn't already installed (e.g., `/opt/my-app`). |
 | `binary_pattern` | String | The filename pattern of the executable inside the archive. `dopt` will search for this to symlink. |
 | `binary_path` | String | *(Optional)* The exact relative path to the binary within the archive. Overrides `binary_pattern`. |
+| `icon_path` | String | *(Optional)* The exact relative path or filename of the icon to use for the `.desktop` file. |
 | `cli_only` | Boolean/String | Set to `"true"` if the application has no GUI. Prevents `.desktop` file creation. |
 | `symlink_as` | String | The name of the symlink created in `/usr/local/bin` (e.g., `myapp`). |
 | `categories` | String | Categories for the `.desktop` file (e.g., `Utility;Development;`). |

@@ -79,9 +79,69 @@ fi
 REAL_USER="${SUDO_USER:-$USER}"
 USER_HOME=$(getent passwd "$REAL_USER" | cut -d: -f6)
 
-# 3. Ingest and extract values out of the Manifest Recipe
+# 3. Resolve App ID
 if [[ -n "$MANIFEST" && -f "$MANIFEST" ]]; then
     APP_ID=$(jq -r '.app_id' "$MANIFEST")
+else
+    APP_ID="${APP_ID_CLI:-}"
+    if [[ -z "$APP_ID" ]]; then
+        echo "[*] No manifest provided. Using interactive setup..."
+        read -r -p "[?] Enter App ID (e.g. com.example.app): " APP_ID
+    fi
+    [[ -z "$APP_ID" ]] && { echo "[-] Error: App ID is required."; exit 1; }
+fi
+
+# Extract legacy state for auto-population and cleanup
+DEF_APP_NAME=""
+DEF_SYMLINK_NAME=""
+DEF_CLI_ANS=""
+DEF_BINARY_PATTERN=""
+DEF_ICON_MANIFEST=""
+LEGACY_DESKTOP_FILE=""
+
+if [[ -d "/opt/$APP_ID" ]]; then
+    DESKTOP_SEARCH_PATHS=(
+        "/usr/share/applications"
+        "/usr/local/share/applications"
+        "$USER_HOME/.local/share/applications"
+        "/opt/$APP_ID"
+    )
+    for dp in "${DESKTOP_SEARCH_PATHS[@]}"; do
+        if [[ -f "$dp/${APP_ID}.desktop" ]]; then
+            EXEC_VAL=$(grep "^Exec=" "$dp/${APP_ID}.desktop" | cut -d= -f2- | awk '{print $1}' || true)
+            if [[ "$EXEC_VAL" == "/usr/local/bin/"* || "$EXEC_VAL" == "/opt/"* ]]; then
+                LEGACY_DESKTOP_FILE="$dp/${APP_ID}.desktop"
+                break
+            fi
+        fi
+    done
+
+    if [[ -n "$LEGACY_DESKTOP_FILE" ]]; then
+        DEF_APP_NAME=$(grep "^Name=" "$LEGACY_DESKTOP_FILE" | cut -d= -f2- || true)
+        DEF_BIN_LINK=$(grep "^Exec=" "$LEGACY_DESKTOP_FILE" | cut -d= -f2- | awk '{print $1}' || true)
+        DEF_SYMLINK_NAME=$(basename "$DEF_BIN_LINK" || true)
+        DEF_CLI_ANS="n"
+        
+        if [[ -L "$DEF_BIN_LINK" ]]; then
+            REAL_BIN=$(readlink -f "$DEF_BIN_LINK" 2>/dev/null || true)
+            [[ -n "$REAL_BIN" ]] && DEF_BINARY_PATTERN=$(basename "$REAL_BIN")
+        fi
+        
+        DEF_ICON_FULL=$(grep "^Icon=" "$LEGACY_DESKTOP_FILE" | cut -d= -f2- || true)
+        DEF_ICON_MANIFEST=$(basename "$DEF_ICON_FULL" || true)
+    else
+        EXISTING_LINK=$(find /usr/local/bin -maxdepth 1 -type l -lname "/opt/$APP_ID/*" | head -n 1 2>/dev/null || true)
+        if [[ -n "$EXISTING_LINK" ]]; then
+            DEF_SYMLINK_NAME=$(basename "$EXISTING_LINK")
+            DEF_CLI_ANS="y"
+            REAL_BIN=$(readlink -f "$EXISTING_LINK" 2>/dev/null || true)
+            [[ -n "$REAL_BIN" ]] && DEF_BINARY_PATTERN=$(basename "$REAL_BIN")
+        fi
+    fi
+fi
+
+# Ingest and extract remaining values
+if [[ -n "$MANIFEST" && -f "$MANIFEST" ]]; then
     APP_NAME=$(jq -r '.name' "$MANIFEST")
     APP_COMMENT=$(jq -r '.comment' "$MANIFEST")
     DEFAULT_INSTALL_DIR=$(jq -r '.default_install_dir' "$MANIFEST")
@@ -93,20 +153,18 @@ if [[ -n "$MANIFEST" && -f "$MANIFEST" ]]; then
     APP_CATEGORIES=$(jq -r '.categories' "$MANIFEST")
     EXEC_FLAGS=$(jq -r '.exec_flags' "$MANIFEST")
 else
-    echo "[*] No manifest provided. Using interactive setup..."
-    APP_ID="${APP_ID_CLI:-}"
-    if [[ -z "$APP_ID" ]]; then
-        read -r -p "[?] Enter App ID (e.g. com.example.app): " APP_ID
-    fi
-    [[ -z "$APP_ID" ]] && { echo "[-] Error: App ID is required."; exit 1; }
+    [[ -d "/opt/$APP_ID" ]] && echo "[*] Existing installation detected. Auto-populating defaults..."
     
-    read -r -p "[?] Enter Application Name [$APP_ID]: " APP_NAME
-    APP_NAME=${APP_NAME:-$APP_ID}
+    read -r -p "[?] Enter Application Name [${DEF_APP_NAME:-$APP_ID}]: " APP_NAME
+    APP_NAME=${APP_NAME:-${DEF_APP_NAME:-$APP_ID}}
     
-    read -r -p "[?] Enter executable symlink name [$APP_ID]: " SYMLINK_NAME
-    SYMLINK_NAME=${SYMLINK_NAME:-$APP_ID}
+    read -r -p "[?] Enter executable symlink name [${DEF_SYMLINK_NAME:-$APP_ID}]: " SYMLINK_NAME
+    SYMLINK_NAME=${SYMLINK_NAME:-${DEF_SYMLINK_NAME:-$APP_ID}}
     
-    read -r -p "[?] Is this a CLI-only application? [y/N]: " cli_ans
+    cli_prompt_def="[y/N]"
+    [[ "${DEF_CLI_ANS,,}" == "y" ]] && cli_prompt_def="[Y/n]"
+    read -r -p "[?] Is this a CLI-only application? $cli_prompt_def: " cli_ans
+    cli_ans=${cli_ans:-${DEF_CLI_ANS:-n}}
     if [[ "${cli_ans,,}" =~ ^(yes|y) ]]; then
         CLI_ONLY="true"
     else
@@ -115,10 +173,16 @@ else
     
     APP_COMMENT=""
     DEFAULT_INSTALL_DIR="/opt/$APP_ID"
-    read -r -p "[?] Enter target binary name to link [$SYMLINK_NAME]: " BINARY_PATTERN
-    BINARY_PATTERN=${BINARY_PATTERN:-$SYMLINK_NAME}
+    
+    read -r -p "[?] Enter target binary name to link [${DEF_BINARY_PATTERN:-$SYMLINK_NAME}]: " BINARY_PATTERN
+    BINARY_PATTERN=${BINARY_PATTERN:-${DEF_BINARY_PATTERN:-$SYMLINK_NAME}}
     BINARY_PATH=""
-    read -r -p "[?] Enter icon file path/name (leave blank to auto-detect): " ICON_PATH_MANIFEST
+    
+    icon_prompt_def="(leave blank to auto-detect)"
+    [[ -n "$DEF_ICON_MANIFEST" ]] && icon_prompt_def="[$DEF_ICON_MANIFEST]"
+    read -r -p "[?] Enter icon file path/name $icon_prompt_def: " ICON_PATH_MANIFEST
+    ICON_PATH_MANIFEST=${ICON_PATH_MANIFEST:-$DEF_ICON_MANIFEST}
+    
     APP_CATEGORIES="Utility;"
     EXEC_FLAGS=""
 fi
@@ -230,15 +294,22 @@ if [[ -n "$LOCAL_BIN" && -f "$LOCAL_BIN" ]]; then
     ESCAPED_BIN_NAME=$(echo "$RUNNING_BIN_NAME" | sed 's/[^a-zA-Z0-9_-]/\\&/g')
     
     if pgrep -u "$REAL_USER" -f "$ESCAPED_BIN_NAME" > /dev/null 2>&1; then
-        echo -e "\n[!] Active Process Block: $APP_NAME is currently running."
-        read -r -p "[?] Kill process, deploy workspace matrix, and auto-restart? [Y/n]: " run_res
-        if [[ ! "${run_res,,}" =~ ^(no|n) ]]; then
+        if [ "$FORCE_INSTALL" = true ]; then
+            echo -e "\n[!] Warning: Forced installation active. Automatically terminating active processes for update..."
             pkill -u "$REAL_USER" -f "$ESCAPED_BIN_NAME" || true; sleep 1.5
             pkill -9 -u "$REAL_USER" -f "$ESCAPED_BIN_NAME" || true
             if [[ "$CLI_ONLY" != "true" ]]; then RESTART_REQD=true; fi
         else
-            echo "[-] Update cycle canceled to keep app active."
-            exit 0
+            echo -e "\n[!] Active Process Block: $APP_NAME is currently running."
+            read -r -p "[?] Kill process to deploy update? [Y/n]: " run_res
+            if [[ ! "${run_res,,}" =~ ^(no|n) ]]; then
+                pkill -u "$REAL_USER" -f "$ESCAPED_BIN_NAME" || true; sleep 1.5
+                pkill -9 -u "$REAL_USER" -f "$ESCAPED_BIN_NAME" || true
+                if [[ "$CLI_ONLY" != "true" ]]; then RESTART_REQD=true; fi
+            else
+                echo "[-] Update cycle canceled to keep app active."
+                exit 0
+            fi
         fi
     fi
 fi
@@ -306,6 +377,10 @@ if [[ "$CLI_ONLY" != "true" ]]; then
     fi
 
     DESKTOP_FILE="$DESKTOP_DIR/${APP_ID}.desktop"
+    if [[ -n "${LEGACY_DESKTOP_FILE:-}" && "$LEGACY_DESKTOP_FILE" != "$DESKTOP_FILE" ]]; then
+        echo "[*] Removing legacy desktop integration at $LEGACY_DESKTOP_FILE..."
+        rm -f "$LEGACY_DESKTOP_FILE"
+    fi
     echo "[*] Injecting desktop menu shell reference configuration at $DESKTOP_FILE..."
 
     cat << EOF > "$DESKTOP_FILE"
@@ -340,14 +415,30 @@ if [ "$DOWNLOAD" = true ]; then
 fi
 
 # 10. Environment variables reload check for UI relaunch mapping
-if [ "$RESTART_REQD" = true ]; then
-    echo "[*] Relaunching application window environment inside active desktop framework layer..."
-    sudo -u "$REAL_USER" env \
-        DISPLAY="${DISPLAY:-:0}" \
-        WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-}" \
-        XDG_RUNTIME_DIR="/run/user/$(id -u "$REAL_USER")" \
-        nohup "$BIN_LINK" > /dev/null 2>&1 &
-    echo "[+] Application successfully brought back online."
+if [[ "$CLI_ONLY" != "true" ]]; then
+    if [ "$FORCE_INSTALL" = true ]; then
+        if [ "$RESTART_REQD" = true ]; then
+            echo "[*] Auto-relaunching application window environment..."
+            sudo -u "$REAL_USER" env \
+                DISPLAY="${DISPLAY:-:0}" \
+                WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-}" \
+                XDG_RUNTIME_DIR="/run/user/$(id -u "$REAL_USER")" \
+                nohup "$BIN_LINK" > /dev/null 2>&1 &
+            echo "[+] Application successfully brought back online."
+        fi
+    else
+        echo ""
+        read -r -p "[?] Deployment complete. Would you like to launch $APP_NAME now? [Y/n]: " launch_ans
+        if [[ ! "${launch_ans,,}" =~ ^(no|n) ]]; then
+            echo "[*] Launching application..."
+            sudo -u "$REAL_USER" env \
+                DISPLAY="${DISPLAY:-:0}" \
+                WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-}" \
+                XDG_RUNTIME_DIR="/run/user/$(id -u "$REAL_USER")" \
+                nohup "$BIN_LINK" > /dev/null 2>&1 &
+            echo "[+] Application successfully launched."
+        fi
+    fi
 fi
 
 echo -e "\n[+] Success! $APP_NAME has been deployed via dopt."
