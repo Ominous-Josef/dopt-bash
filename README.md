@@ -31,11 +31,11 @@ sudo dnf install jq curl
 
 ### Syntax
 ```bash
-sudo ./dopt.sh [options]
+./dopt.sh [options]
 ```
 
 > [!WARNING]
-> Security Notice: `dopt` requires `root` privileges (`sudo`) to execute, as it creates symlinks in `/usr/local/bin` and installs desktop entries to `/usr/share/applications`. Ensure you trust the URLs provided in your manifest files.
+> Security Notice: When using the `--global` flag, `dopt` requires `root` privileges (`sudo`) to execute, as it installs system-wide to `/opt` and `/usr/local/bin`. Ensure you trust the URLs provided in your manifest files.
 
 ### Options
 
@@ -52,6 +52,7 @@ If no manifest is provided, `dopt` will launch an **Interactive Wizard** to guid
 - `-p, --path <dir>`: Scan a specific directory for the newest matching local archive.
 
 **Modifiers:**
+- `-g, --global`: Install the application system-wide to `/opt` (requires `sudo`).
 - `-c, --cleanup`: Delete the downloaded tarball after a successful setup.
 - `-i, --install`: Force a fresh installation, bypassing user prompts if no existing version is found.
 - `-h, --help`: Show the help menu.
@@ -60,7 +61,7 @@ If no manifest is provided, `dopt` will launch an **Interactive Wizard** to guid
 
 Because `dopt` does not maintain a complex internal database, updating an application is functionally identical to installing it. The golden rule is: **Same App ID = Overwrite / Update**.
 
-When you run `dopt` with a new `.tar.gz` payload, as long as the `app_id` matches the existing installation (either defined in the JSON manifest, passed via `-a`, or typed into the interactive prompt), `dopt` will safely clear the old `/opt/<app-id>` directory and install the new version in its place. No special update flags are required!
+When you run `dopt` with a new `.tar.gz` payload, as long as the `app_id` matches the existing installation (either defined in the JSON manifest, passed via `-a`, or typed into the interactive prompt), `dopt` will safely clear the old installation directory and install the new version in its place. No special update flags are required!
 
 If you are updating via the **Interactive Wizard**, `dopt` will intelligently scan your system for existing `.desktop` files and `/usr/local/bin` symlinks belonging to that App ID, and auto-populate all wizard prompts for a frictionless update experience. If you forgot the App ID you used previously, simply type `?` at the first prompt to see a list of all packages in your `/opt` folder.
 
@@ -68,37 +69,37 @@ Additionally, if you ever abort an update (e.g., to save your work in an activel
 
 ### Examples
 
-**1. Install/Update from the internet:**
+**1. Local Install from the internet:**
 ```bash
-sudo ./dopt.sh -m examples/example-manifest.json -d
+./dopt.sh -m examples/example-manifest.json -d
 ```
 
-**2. Install from a specific local archive:**
+**2. Global Install from a specific local archive (Requires sudo):**
 ```bash
-sudo ./dopt.sh -m examples/example-manifest.json -f ~/Downloads/my-app-latest.tar.gz
+sudo ./dopt.sh -g -m examples/example-manifest.json -f ~/Downloads/my-app-latest.tar.gz
 ```
 
 **3. Scan the `~/Downloads` folder for the newest release and clean up the archive after:**
 ```bash
-sudo ./dopt.sh -m examples/example-manifest.json -p ~/Downloads -c
+./dopt.sh -m examples/example-manifest.json -p ~/Downloads -c
 ```
 
 **4. Interactive Install (No Manifest):**
 If you don't have a manifest, you can just point `dopt` directly at a tarball. It will launch an interactive setup wizard to ask for the App ID and Name.
 ```bash
-sudo ./dopt.sh -f ~/Downloads/some-new-app-linux-x64.tar.gz
+./dopt.sh -f ~/Downloads/some-new-app-linux-x64.tar.gz
 ```
 
 **5. Scripted Install (No Manifest):**
 Bypass the interactive wizard by providing the App ID directly via the `-a` flag.
 ```bash
-sudo ./dopt.sh -a com.some.app -f ~/Downloads/some-new-app-linux-x64.tar.gz
+./dopt.sh -a com.some.app -f ~/Downloads/some-new-app-linux-x64.tar.gz
 ```
 
 **6. Download from a Direct URL (No Manifest):**
 You can also download and install straight from a direct link without needing a manifest.
 ```bash
-sudo ./dopt.sh -a com.some.app -u https://example.com/downloads/some-app-linux.tar.gz
+./dopt.sh -a com.some.app -u https://example.com/downloads/some-app-linux.tar.gz
 ```
 
 ## The Manifest File (`recipe.json`)
@@ -136,5 +137,5 @@ The manifest is a JSON file that defines the application parameters. See `exampl
 ## Limitations & Future Work
 
 - **Archive format:** Currently, `dopt` strictly expects standard `tar.gz` (`.tar.gz`) archives.
-- **Hardcoded paths:** System paths for bins (`/usr/local/bin`) and desktop files (`/usr/share/applications`) are hardcoded.
+- **Hardcoded paths:** Depending on the mode, core structural paths (`~/.local/opt`, `/opt`, `/usr/local/bin`) are hardcoded into the engine logic.
 - **Deletions:** The update process deletes the existing `INSTALL_DIR` before copying the new framework. While safeguards exist to protect core OS directories, misconfigurations could still be dangerous. Use with caution!

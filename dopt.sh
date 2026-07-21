@@ -7,9 +7,6 @@
 
 set -euo pipefail
 
-BIN_LINK_DIR="/usr/local/bin"
-DESKTOP_DIR="/usr/share/applications"
-
 # Default flag parameters
 MANIFEST=""
 DOWNLOAD=false
@@ -19,10 +16,11 @@ SEARCH_DIR="."
 FILE_PATH=""
 CUSTOM_URL=""
 RESTART_REQD=false
+GLOBAL_INSTALL=false
 
 show_help() {
     echo "dopt - Dynamic Optional Package Manager"
-    echo "Usage: sudo ./dopt -m <recipe.json> [options]"
+    echo "Usage: ./dopt -m <recipe.json> [options]"
     echo ""
     echo "Manifest (Optional):"
     echo "  -m, --manifest <json>   The application manifest recipe configuration file"
@@ -35,6 +33,7 @@ show_help() {
     echo "  -p, --path <dir>        Scan a specific directory folder for a matching local archive"
     echo ""
     echo "Modifiers:"
+    echo "  -g, --global            Install system-wide to /opt (requires sudo)"
     echo "  -c, --cleanup           Delete downloaded installer archive after a successful setup"
     echo "  -i, --install           Force run a fresh setup without checking prompts"
     echo "  -h, --help              Show this help menu"
@@ -48,6 +47,7 @@ while [[ $# -gt 0 ]]; do
         -a|--app-id)   APP_ID_CLI="$2"; shift 2 ;;
         -d|--download) DOWNLOAD=true; shift ;;
         -c|--cleanup)  CLEANUP=true; shift ;;
+        -g|--global)   GLOBAL_INSTALL=true; shift ;;
         -i|--install)  FORCE_INSTALL=true; shift ;;
         -u|--url)      DOWNLOAD=true; CUSTOM_URL="$2"; shift 2 ;;
         -f|--file)     FILE_PATH="$2"; shift 2 ;;
@@ -70,14 +70,29 @@ if [[ -n "$MANIFEST" ]]; then
     fi
 fi
 
-# 2. Secure environment validation hooks
-if [[ $EUID -ne 0 ]]; then
-   echo "[-] Error: dopt engine modifications require root context. Re-run command using sudo." >&2
-   exit 1
-fi
-
+# 2. Secure environment validation hooks & Path Resolution
 REAL_USER="${SUDO_USER:-$USER}"
 USER_HOME=$(getent passwd "$REAL_USER" | cut -d: -f6)
+
+if [ "$GLOBAL_INSTALL" = true ]; then
+    if [[ $EUID -ne 0 ]]; then
+        echo "[-] Error: Global deployment requires root context. Re-run command using sudo." >&2
+        exit 1
+    fi
+    OPT_DIR="/opt"
+    BIN_LINK_DIR="/usr/local/bin"
+    DESKTOP_DIR="/usr/share/applications"
+else
+    if [[ $EUID -eq 0 ]]; then
+        echo "[-] Error: Local installation should not be run as root. Re-run without sudo, or pass --global for system-wide deployment." >&2
+        exit 1
+    fi
+    OPT_DIR="$USER_HOME/.local/opt"
+    BIN_LINK_DIR="$USER_HOME/.local/bin"
+    DESKTOP_DIR="$USER_HOME/.local/share/applications"
+    
+    mkdir -p "$OPT_DIR" "$BIN_LINK_DIR" "$DESKTOP_DIR"
+fi
 
 # 3. Resolve App ID
 if [[ -n "$MANIFEST" && -f "$MANIFEST" ]]; then
@@ -90,8 +105,8 @@ else
         while true; do
             read -r -p "[?] Enter App ID (e.g. com.example.app): " APP_ID
             if [[ "$APP_ID" == "?" ]]; then
-                echo -e "\n--- Installed Applications in /opt ---"
-                for dir in /opt/*/; do
+                echo -e "\n--- Installed Applications in $OPT_DIR ---"
+                for dir in "$OPT_DIR"/*/; do
                     [[ -d "$dir" ]] && echo "- $(basename "$dir")"
                 done
                 echo -e "--------------------------------------\n"
@@ -109,19 +124,21 @@ DEF_SYMLINK_NAME=""
 DEF_CLI_ANS=""
 DEF_BINARY_PATTERN=""
 DEF_ICON_MANIFEST=""
+DEF_CATEGORIES=""
 LEGACY_DESKTOP_FILE=""
 
-if [[ -d "/opt/$APP_ID" ]]; then
+if [[ -d "$OPT_DIR/$APP_ID" ]]; then
     DESKTOP_SEARCH_PATHS=(
+        "$DESKTOP_DIR"
         "/usr/share/applications"
         "/usr/local/share/applications"
         "$USER_HOME/.local/share/applications"
-        "/opt/$APP_ID"
+        "$OPT_DIR/$APP_ID"
     )
     for dp in "${DESKTOP_SEARCH_PATHS[@]}"; do
         if [[ -f "$dp/${APP_ID}.desktop" ]]; then
             EXEC_VAL=$(grep "^Exec=" "$dp/${APP_ID}.desktop" | cut -d= -f2- | awk '{print $1}' || true)
-            if [[ "$EXEC_VAL" == "/usr/local/bin/"* || "$EXEC_VAL" == "/opt/"* ]]; then
+            if [[ "$EXEC_VAL" == "/usr/local/bin/"* || "$EXEC_VAL" == "$BIN_LINK_DIR/"* || "$EXEC_VAL" == "/opt/"* || "$EXEC_VAL" == "$OPT_DIR/"* ]]; then
                 LEGACY_DESKTOP_FILE="$dp/${APP_ID}.desktop"
                 break
             fi
@@ -141,8 +158,9 @@ if [[ -d "/opt/$APP_ID" ]]; then
         
         DEF_ICON_FULL=$(grep "^Icon=" "$LEGACY_DESKTOP_FILE" | cut -d= -f2- || true)
         DEF_ICON_MANIFEST=$(basename "$DEF_ICON_FULL" || true)
+        DEF_CATEGORIES=$(grep "^Categories=" "$LEGACY_DESKTOP_FILE" | cut -d= -f2- || true)
     else
-        EXISTING_LINK=$(find /usr/local/bin -maxdepth 1 -type l -lname "/opt/$APP_ID/*" | head -n 1 2>/dev/null || true)
+        EXISTING_LINK=$(find "$BIN_LINK_DIR" -maxdepth 1 -type l -lname "$OPT_DIR/$APP_ID/*" | head -n 1 2>/dev/null || true)
         if [[ -n "$EXISTING_LINK" ]]; then
             DEF_SYMLINK_NAME=$(basename "$EXISTING_LINK")
             DEF_CLI_ANS="y"
@@ -156,7 +174,7 @@ fi
 if [[ -n "$MANIFEST" && -f "$MANIFEST" ]]; then
     APP_NAME=$(jq -r '.name' "$MANIFEST")
     APP_COMMENT=$(jq -r '.comment' "$MANIFEST")
-    DEFAULT_INSTALL_DIR=$(jq -r '.default_install_dir' "$MANIFEST")
+    DEFAULT_INSTALL_DIR="$OPT_DIR/$APP_ID"
     BINARY_PATTERN=$(jq -r '.binary_pattern' "$MANIFEST")
     BINARY_PATH=$(jq -r '.binary_path' "$MANIFEST")
     ICON_PATH_MANIFEST=$(jq -r '.icon_path' "$MANIFEST")
@@ -165,7 +183,7 @@ if [[ -n "$MANIFEST" && -f "$MANIFEST" ]]; then
     APP_CATEGORIES=$(jq -r '.categories' "$MANIFEST")
     EXEC_FLAGS=$(jq -r '.exec_flags' "$MANIFEST")
 else
-    [[ -d "/opt/$APP_ID" ]] && echo "[*] Existing installation detected. Auto-populating defaults..."
+    [[ -d "$OPT_DIR/$APP_ID" ]] && echo "[*] Existing installation detected. Auto-populating defaults..."
     
     read -r -p "[?] Enter Application Name [${DEF_APP_NAME:-$APP_ID}]: " APP_NAME
     APP_NAME=${APP_NAME:-${DEF_APP_NAME:-$APP_ID}}
@@ -184,7 +202,7 @@ else
     fi
     
     APP_COMMENT=""
-    DEFAULT_INSTALL_DIR="/opt/$APP_ID"
+    DEFAULT_INSTALL_DIR="$OPT_DIR/$APP_ID"
     
     read -r -p "[?] Enter target binary name to link [${DEF_BINARY_PATTERN:-$SYMLINK_NAME}]: " BINARY_PATTERN
     BINARY_PATTERN=${BINARY_PATTERN:-${DEF_BINARY_PATTERN:-$SYMLINK_NAME}}
@@ -195,7 +213,10 @@ else
     read -r -p "[?] Enter icon file path/name $icon_prompt_def: " ICON_PATH_MANIFEST
     ICON_PATH_MANIFEST=${ICON_PATH_MANIFEST:-$DEF_ICON_MANIFEST}
     
-    APP_CATEGORIES="Utility;"
+    read -r -p "[?] Enter Desktop Category (e.g. Utility;, Development;, Game;) [${DEF_CATEGORIES:-Utility;}]: " APP_CATEGORIES
+    APP_CATEGORIES=${APP_CATEGORIES:-${DEF_CATEGORIES:-Utility;}}
+    [[ -n "$APP_CATEGORIES" && "$APP_CATEGORIES" != *";" ]] && APP_CATEGORIES="${APP_CATEGORIES};"
+    
     EXEC_FLAGS=""
 fi
 
@@ -210,7 +231,11 @@ INSTALL_DIR=""
 
 # 4. Resolve active system path bindings
 echo "[*] Auditing environment path structures for $APP_NAME..."
-EXISTING_BIN=$(sudo -u "$REAL_USER" which "$SYMLINK_NAME" 2>/dev/null || true)
+if [[ $EUID -eq 0 ]]; then
+    EXISTING_BIN=$(sudo -u "$REAL_USER" which "$SYMLINK_NAME" 2>/dev/null || true)
+else
+    EXISTING_BIN=$(which "$SYMLINK_NAME" 2>/dev/null || true)
+fi
 
 if [[ -f "$BIN_LINK" ]]; then
     INSTALL_DIR=$(dirname "$(readlink -f "$BIN_LINK")")
@@ -353,7 +378,7 @@ fi
 
 # 7. File Erasure and Allocation
 INSTALL_DIR=$(readlink -m "$INSTALL_DIR")
-SAFE_DIRS=("/" "/usr" "/bin" "/etc" "/var" "/opt" "/home" "/usr/local" "/usr/share" "/usr/local/bin")
+SAFE_DIRS=("/" "/usr" "/bin" "/etc" "/var" "/opt" "/home" "/usr/local" "/usr/share" "/usr/local/bin" "$USER_HOME" "$USER_HOME/.local" "$USER_HOME/.local/opt" "$USER_HOME/.local/bin" "$USER_HOME/.local/share")
 for safe_dir in "${SAFE_DIRS[@]}"; do
     if [[ "$INSTALL_DIR" == "$safe_dir" ]]; then
         echo "[-] CRITICAL: Safety abort. Attempted to delete system directory: $INSTALL_DIR" >&2
@@ -464,11 +489,11 @@ if [[ "$CLI_ONLY" != "true" ]]; then
     if [ "$FORCE_INSTALL" = true ]; then
         if [ "$RESTART_REQD" = true ]; then
             echo "[*] Auto-relaunching application window environment..."
-            sudo -u "$REAL_USER" env \
-                DISPLAY="${DISPLAY:-:0}" \
-                WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-}" \
-                XDG_RUNTIME_DIR="/run/user/$(id -u "$REAL_USER")" \
-                nohup "$BIN_LINK" > /dev/null 2>&1 &
+            if [[ $EUID -eq 0 ]]; then
+                sudo -u "$REAL_USER" env DISPLAY="${DISPLAY:-:0}" WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-}" XDG_RUNTIME_DIR="/run/user/$(id -u "$REAL_USER")" nohup "$BIN_LINK" > /dev/null 2>&1 &
+            else
+                env DISPLAY="${DISPLAY:-:0}" WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-}" XDG_RUNTIME_DIR="/run/user/$(id -u "$REAL_USER")" nohup "$BIN_LINK" > /dev/null 2>&1 &
+            fi
             echo "[+] Application successfully brought back online."
         fi
     else
@@ -476,11 +501,11 @@ if [[ "$CLI_ONLY" != "true" ]]; then
         read -r -p "[?] Deployment complete. Would you like to launch $APP_NAME now? [Y/n]: " launch_ans
         if [[ ! "${launch_ans,,}" =~ ^(no|n) ]]; then
             echo "[*] Launching application..."
-            sudo -u "$REAL_USER" env \
-                DISPLAY="${DISPLAY:-:0}" \
-                WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-}" \
-                XDG_RUNTIME_DIR="/run/user/$(id -u "$REAL_USER")" \
-                nohup "$BIN_LINK" > /dev/null 2>&1 &
+            if [[ $EUID -eq 0 ]]; then
+                sudo -u "$REAL_USER" env DISPLAY="${DISPLAY:-:0}" WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-}" XDG_RUNTIME_DIR="/run/user/$(id -u "$REAL_USER")" nohup "$BIN_LINK" > /dev/null 2>&1 &
+            else
+                env DISPLAY="${DISPLAY:-:0}" WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-}" XDG_RUNTIME_DIR="/run/user/$(id -u "$REAL_USER")" nohup "$BIN_LINK" > /dev/null 2>&1 &
+            fi
             echo "[+] Application successfully launched."
         fi
     fi
