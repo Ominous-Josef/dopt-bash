@@ -37,6 +37,22 @@ sudo dnf install jq curl
 > [!WARNING]
 > Security Notice: When using the `--global` flag, `dopt` requires `root` privileges (`sudo`) to execute, as it installs system-wide to `/opt` and `/usr/local/bin`. Ensure you trust the URLs provided in your manifest files.
 
+### Installation Modes
+
+`dopt` uses a modern, local-first architecture to keep your system safe and clean:
+
+**1. Local Mode (Default)**
+If you run `dopt` normally (without `sudo`), it installs the application into isolated folders inside your user directory.
+- **App Files:** `~/.local/opt/<app-id>`
+- **Executable:** `~/.local/bin/<symlink>`
+- **Desktop Icon:** `~/.local/share/applications/<app-id>.desktop`
+
+**2. Global Mode (`--global`)**
+If you pass the `-g` or `--global` flag (which requires `sudo`), `dopt` installs the application system-wide so it is available to all users on the machine.
+- **App Files:** `/opt/<app-id>`
+- **Executable:** `/usr/local/bin/<symlink>`
+- **Desktop Icon:** `/usr/share/applications/<app-id>.desktop`
+
 ### Options
 
 **Manifest (Optional):**
@@ -63,7 +79,7 @@ Because `dopt` does not maintain a complex internal database, updating an applic
 
 When you run `dopt` with a new `.tar.gz` payload, as long as the `app_id` matches the existing installation (either defined in the JSON manifest, passed via `-a`, or typed into the interactive prompt), `dopt` will safely clear the old installation directory and install the new version in its place. No special update flags are required!
 
-If you are updating via the **Interactive Wizard**, `dopt` will intelligently scan your system for existing `.desktop` files and `/usr/local/bin` symlinks belonging to that App ID, and auto-populate all wizard prompts for a frictionless update experience. If you forgot the App ID you used previously, simply type `?` at the first prompt to see a list of all packages in your `/opt` folder.
+If you are updating via the **Interactive Wizard**, `dopt` will intelligently scan your system for existing `.desktop` files and symlinks belonging to that App ID, and auto-populate all wizard prompts for a frictionless update experience. If you forgot the App ID you used previously, simply type `?` at the first prompt to see a list of all packages installed in your target installation directory (either `~/.local/opt` or `/opt`).
 
 Additionally, if you ever abort an update (e.g., to save your work in an actively running app), `dopt` will preserve the downloaded payload in your current directory and provide an exact CLI command to instantly resume the update later without re-downloading.
 
