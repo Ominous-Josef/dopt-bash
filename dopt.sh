@@ -118,6 +118,43 @@ else
     [[ -z "$APP_ID" ]] && { echo "[-] Error: App ID is required."; exit 1; }
 fi
 
+if [ "$GLOBAL_INSTALL" = false ] && [[ -d "/opt/$APP_ID" ]]; then
+    echo -e "\n[!] Found existing system-wide installation of $APP_ID at /opt/$APP_ID."
+    echo "    1) Elevate privileges to update the global installation"
+    echo "    2) Proceed with an isolated local installation"
+    echo "    3) Abort"
+    read -r -p "[?] Choose an action [1-3]: " action_res
+    case "$action_res" in
+        1)
+            echo "[*] Elevating privileges..."
+            if [[ ! " $* " =~ " -a " && ! " $* " =~ " --app-id " && ! " $* " =~ " -m " ]]; then
+                exec sudo "$0" -g "$@" -a "$APP_ID"
+            else
+                exec sudo "$0" -g "$@"
+            fi
+            ;;
+        2)
+            echo "[*] Proceeding with isolated local installation..."
+            read -r -p "[?] To prevent the local app from hiding the global app in your menu, we can append '-local' to the App ID and Name. Do this now? [Y/n]: " rename_res
+            if [[ ! "${rename_res,,}" =~ ^(no|n) ]]; then
+                GLOBAL_DESKTOP="/usr/share/applications/${APP_ID}.desktop"
+                if [[ -f "$GLOBAL_DESKTOP" ]]; then
+                    GLOBAL_NAME=$(grep "^Name=" "$GLOBAL_DESKTOP" | cut -d= -f2- || true)
+                    [[ -n "$GLOBAL_NAME" ]] && DEF_APP_NAME="$GLOBAL_NAME (Local)"
+                fi
+                APP_ID="${APP_ID}-local"
+                APPEND_LOCAL_NAME=true
+                echo "[i] App ID updated to: $APP_ID"
+            fi
+            IGNORE_GLOBAL_MATCH=true
+            ;;
+        *)
+            echo "[-] Deployment aborted."
+            exit 1
+            ;;
+    esac
+fi
+
 # Extract legacy state for auto-population and cleanup
 DEF_APP_NAME=""
 DEF_SYMLINK_NAME=""
@@ -231,10 +268,14 @@ INSTALL_DIR=""
 
 # 4. Resolve active system path bindings
 echo "[*] Auditing environment path structures for $APP_NAME..."
-if [[ $EUID -eq 0 ]]; then
-    EXISTING_BIN=$(sudo -u "$REAL_USER" which "$SYMLINK_NAME" 2>/dev/null || true)
+if [[ "${IGNORE_GLOBAL_MATCH:-false}" == "true" ]]; then
+    EXISTING_BIN=""
 else
-    EXISTING_BIN=$(which "$SYMLINK_NAME" 2>/dev/null || true)
+    if [[ $EUID -eq 0 ]]; then
+        EXISTING_BIN=$(sudo -u "$REAL_USER" which "$SYMLINK_NAME" 2>/dev/null || true)
+    else
+        EXISTING_BIN=$(which "$SYMLINK_NAME" 2>/dev/null || true)
+    fi
 fi
 
 if [[ -f "$BIN_LINK" ]]; then
@@ -274,7 +315,28 @@ fi
 
 # 5. Target Architecture Resolution and Source Acquisition
 TMP_DIR=$(mktemp -d -t dopt-workspace-XXXXXXXX)
-trap 'rm -rf "$TMP_DIR"' EXIT
+cleanup_workspace() {
+    local exit_code=$?
+    if [[ $exit_code -ne 0 && "$DOWNLOAD" = true && -f "${TARBALL:-}" && "$CLEANUP" = false ]]; then
+        URL_FILE_NAME=$(basename "${DOWNLOAD_URL:-}" | sed 's/%20/ /g')
+        [[ "$URL_FILE_NAME" == "download"* || -z "$URL_FILE_NAME" ]] && URL_FILE_NAME="${APP_ID}-linux.tar.gz"
+        OUTPUT_DEST="$(pwd)/$URL_FILE_NAME"
+        if mv -f -- "$TARBALL" "$OUTPUT_DEST" 2>/dev/null; then
+            [[ -n "${SUDO_USER:-}" ]] && chown -- "${SUDO_USER}:" "$OUTPUT_DEST" 2>/dev/null
+            echo -e "\n[i] The downloaded update archive has been preserved at: $OUTPUT_DEST"
+            echo "[!] To apply this update later without re-downloading, run:"
+            [[ "$GLOBAL_INSTALL" = true ]] && SUDO_PREFIX="sudo " || SUDO_PREFIX=""
+            if [[ -n "${MANIFEST:-}" && -f "${MANIFEST:-}" ]]; then
+                echo "    ${SUDO_PREFIX}./dopt.sh -m \"$MANIFEST\" -f \"$OUTPUT_DEST\""
+            else
+                echo "    ${SUDO_PREFIX}./dopt.sh -a \"$APP_ID\" -f \"$OUTPUT_DEST\""
+            fi
+        fi
+    fi
+    rm -rf "$TMP_DIR"
+    exit $exit_code
+}
+trap cleanup_workspace EXIT
 
 ARCH_RAW=$(uname -m)
 case "$ARCH_RAW" in
