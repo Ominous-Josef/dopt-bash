@@ -264,6 +264,14 @@ else
     fi
 fi
 
+if [ "$GLOBAL_INSTALL" = false ]; then
+    if [[ "$INSTALL_DIR" == "/opt/"* || "$INSTALL_DIR" == "/usr/"* ]]; then
+        echo "[-] Error: Found existing system-wide installation at $INSTALL_DIR." >&2
+        echo "[-] You cannot update a global installation in local mode. Please re-run the command with sudo and the --global (-g) flag." >&2
+        exit 1
+    fi
+fi
+
 # 5. Target Architecture Resolution and Source Acquisition
 TMP_DIR=$(mktemp -d -t dopt-workspace-XXXXXXXX)
 trap 'rm -rf "$TMP_DIR"' EXIT
@@ -385,6 +393,20 @@ for safe_dir in "${SAFE_DIRS[@]}"; do
         exit 1
     fi
 done
+
+if [[ -e "$INSTALL_DIR" && ! -w "$INSTALL_DIR" ]]; then
+    echo "[-] Error: Permission denied. You do not have write access to $INSTALL_DIR." >&2
+    if [[ "$INSTALL_DIR" == "/opt/"* || "$INSTALL_DIR" == "/usr/"* ]]; then
+        echo "[i] This appears to be a system-wide installation. Try running dopt with sudo and the --global flag." >&2
+    fi
+    exit 1
+elif [[ ! -e "$INSTALL_DIR" ]]; then
+    PARENT_DIR=$(dirname "$INSTALL_DIR")
+    if [[ ! -w "$PARENT_DIR" ]]; then
+        echo "[-] Error: Permission denied. You do not have write access to create $INSTALL_DIR." >&2
+        exit 1
+    fi
+fi
 
 echo "[*] Deep cleaning legacy directory mappings to clear stale libraries..."
 rm -rf -- "$INSTALL_DIR"
