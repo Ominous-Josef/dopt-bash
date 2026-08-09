@@ -37,6 +37,10 @@ show_help() {
     echo "  -c, --cleanup           Delete downloaded installer archive after a successful setup"
     echo "  -i, --install           Force run a fresh setup without checking prompts"
     echo "  -h, --help              Show this help menu"
+    echo ""
+    echo "Documentation & Examples:"
+    echo "  Full documentation: https://github.com/Ominous-Josef/dopt-bash"
+    echo "  Manifest template:  See 'examples/example-manifest.json'"
 }
 
 

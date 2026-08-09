@@ -11,7 +11,9 @@
 - **Architecture Awareness:** Automatically pulls the correct binary (x86_64 vs aarch64) based on the host architecture.
 - **Desktop Integration:** Automatically creates `.desktop` files for GUI applications and binds them to icons found within the package.
 - **Process Management:** Detects if the target application is running, safely terminates it before upgrading, and prompts to launch the app after deployment.
-- **Graceful Aborts:** Canceling an update preserves the downloaded payload and generates a fast-resume command.
+- **Graceful Aborts:** Any unexpected failure or cancellation post-download will automatically rescue the payload and generate a fast-resume command.
+- **Interactive Recovery:** If a local package scan fails, it doesn't just crash—it prompts you to dynamically provide a URL or exact path instead.
+- **Conflict Resolution:** Safely detects when you try to update a global app locally, offering to auto-escalate with `sudo` or safely isolate the new local desktop shortcut.
 - **Smart Updates:** When updating interactively, `dopt` reverse-engineers previous installations to auto-populate the setup wizard.
 - **App Discovery:** If you forgot the App ID for an update, type `?` in the wizard to list all packages in your `/opt` folder.
 - **Flexible Deployments:** Install straight from a network URL, from a local archive file, or let `dopt` scan a directory for the latest matching version.
@@ -81,7 +83,7 @@ When you run `dopt` with a new `.tar.gz` payload, as long as the `app_id` matche
 
 If you are updating via the **Interactive Wizard**, `dopt` will intelligently scan your system for existing `.desktop` files and symlinks belonging to that App ID, and auto-populate all wizard prompts for a frictionless update experience. If you forgot the App ID you used previously, simply type `?` at the first prompt to see a list of all packages installed in your target installation directory (either `~/.local/opt` or `/opt`).
 
-Additionally, if you ever abort an update (e.g., to save your work in an actively running app), `dopt` will preserve the downloaded payload in your current directory and provide an exact CLI command to instantly resume the update later without re-downloading.
+Additionally, if an update is ever aborted (e.g., to save your work in an actively running app, or due to a sudden permission error), `dopt`'s global error handler will instantly rescue the downloaded payload into your current directory and provide an exact CLI command to resume the update later without re-downloading.
 
 ### Examples
 
