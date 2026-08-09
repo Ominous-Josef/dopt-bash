@@ -20,13 +20,13 @@ GLOBAL_INSTALL=false
 
 show_help() {
     echo "dopt - Dynamic Optional Package Manager"
-    echo "Usage: ./dopt -m <recipe.json> [options]"
+    echo "Usage: ./dopt.sh [options]"
     echo ""
     echo "Manifest (Optional):"
     echo "  -m, --manifest <json>   The application manifest recipe configuration file"
     echo "  -a, --app-id <id>       Provide App ID directly if not using a manifest"
     echo ""
-    echo "Deployment Targets (Choose one):"
+    echo "Deployment Targets (Choose one. Defaults to scanning '.' if omitted):"
     echo "  -d, --download          Download using the manifest's default server endpoint"
     echo "  -u, --url <url>         Download using a specific direct link override"
     echo "  -f, --file <path>       Directly deploy from a local archive package file"
@@ -153,6 +153,46 @@ if [ "$GLOBAL_INSTALL" = false ] && [[ -d "/opt/$APP_ID" ]]; then
             exit 1
             ;;
     esac
+fi
+
+# 3.5 Source Validation & Recovery
+if [ "$DOWNLOAD" = false ] && [[ -z "$FILE_PATH" ]]; then
+    [[ "$SEARCH_DIR" == "~"* ]] && SEARCH_DIR="${SEARCH_DIR/\~/$USER_HOME}"
+    LATEST_TARBALL=$(ls -t -- "$SEARCH_DIR"/*"${APP_ID}"*.tar.gz 2>/dev/null | head -n 1 || true)
+    if [[ -z "$LATEST_TARBALL" ]]; then
+        echo -e "\n[-] Could not automatically find a package matching '*${APP_ID}*.tar.gz' in '$SEARCH_DIR'."
+        echo "[?] How would you like to provide the application payload?"
+        echo "    1) Provide a direct download URL"
+        echo "    2) Provide the exact local file path"
+        echo "    3) Abort"
+        read -r -p "[?] Choose an action [1-3]: " source_res
+        case "$source_res" in
+            1)
+                read -r -p "[?] Enter full URL (e.g. https://...): " CUSTOM_URL
+                [[ -z "$CUSTOM_URL" ]] && { echo "[-] URL cannot be empty."; exit 1; }
+                DOWNLOAD=true
+                ;;
+            2)
+                read -r -p "[?] Enter exact local file path: " FILE_PATH
+                [[ -z "$FILE_PATH" ]] && { echo "[-] Path cannot be empty."; exit 1; }
+                [[ "$FILE_PATH" == "~"* ]] && FILE_PATH="${FILE_PATH/\~/$USER_HOME}"
+                if [[ ! -f "$FILE_PATH" ]]; then 
+                    echo "[-] Path fault: Target file missing: $FILE_PATH" >&2; exit 1
+                fi
+                ;;
+            *)
+                echo "[-] Deployment aborted."
+                exit 1
+                ;;
+        esac
+    else
+        TARBALL_SCANNED="$LATEST_TARBALL"
+    fi
+elif [[ -n "$FILE_PATH" ]]; then
+    [[ "$FILE_PATH" == "~"* ]] && FILE_PATH="${FILE_PATH/\~/$USER_HOME}"
+    if [[ ! -f "$FILE_PATH" ]]; then 
+        echo "[-] Path fault: Target file missing: $FILE_PATH" >&2; exit 1
+    fi
 fi
 
 # Extract legacy state for auto-population and cleanup
@@ -366,17 +406,12 @@ if [ "$DOWNLOAD" = true ]; then
         exit 1
     fi
 elif [[ -n "$FILE_PATH" ]]; then
-    [[ "$FILE_PATH" == "~"* ]] && FILE_PATH="${FILE_PATH/\~/$USER_HOME}"
-    if [[ ! -f "$FILE_PATH" ]]; then echo "[-] Path fault: Target file missing: $FILE_PATH" >&2; exit 1; fi
     TARBALL="$FILE_PATH"
 else
-    [[ "$SEARCH_DIR" == "~"* ]] && SEARCH_DIR="${SEARCH_DIR/\~/$USER_HOME}"
-    echo "[*] Scanning directories under '$SEARCH_DIR' for updates..."
-    LATEST_TARBALL=$(ls -t -- "$SEARCH_DIR"/*"${APP_ID}"*.tar.gz 2>/dev/null | head -n 1 || true)
-    if [[ -z "$LATEST_TARBALL" ]]; then
-        echo "[-] Archive fault: No deployment packages matching *${APP_ID}*.tar.gz found." >&2; exit 1
+    TARBALL="${TARBALL_SCANNED:-}"
+    if [[ -z "$TARBALL" ]]; then
+        echo "[-] Critical Fault: Scanned tarball reference lost." >&2; exit 1
     fi
-    TARBALL="$LATEST_TARBALL"
 fi
 
 # 6. Unpack and Parse Sandbox Interior
