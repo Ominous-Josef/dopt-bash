@@ -14,7 +14,7 @@ MANIFEST=""
 DOWNLOAD=false
 CLEANUP=false
 FORCE_INSTALL=false
-SEARCH_DIR="."
+SHA256_EXPECTED=""
 FILE_PATH=""
 CUSTOM_URL=""
 SYMLINK_CLI=""
@@ -30,11 +30,11 @@ show_help() {
     echo "  -a, --app-id <id>       Provide App ID directly if not using a manifest"
     echo "  -s, --symlink-as <name> Command name to link (overrides the manifest's 'symlink_as')"
     echo ""
-    echo "Deployment Targets (Choose one. Defaults to scanning '.' if omitted):"
+    echo "Deployment Targets (Choose one. If omitted, dopt offers your recent downloads):"
     echo "  -d, --download          Download using the manifest's default server endpoint"
     echo "  -u, --url <url>         Download using a specific direct link override"
     echo "  -f, --file <path>       Directly deploy from a local archive package file"
-    echo "  -p, --path <dir>        Scan a specific directory folder for a matching local archive"
+    echo "      --sha256 <hash>     Verify the archive's SHA-256 checksum before installing"
     echo ""
     echo "Modifiers:"
     echo "  -g, --global            Install system-wide to /opt (requires sudo)"
@@ -132,7 +132,14 @@ while [[ $# -gt 0 ]]; do
         -i|--install)  FORCE_INSTALL=true; shift ;;
         -u|--url)      DOWNLOAD=true; CUSTOM_URL="$2"; shift 2 ;;
         -f|--file)     FILE_PATH="$2"; shift 2 ;;
-        -p|--path)     SEARCH_DIR="$2"; shift 2 ;;
+        -p|--path)     echo "[-] Error: -p was removed in 2.0; pass the archive with -f <file>." >&2; exit 1 ;;
+        --sha256)
+            SHA256_EXPECTED="${2,,}"
+            if [[ ! "$SHA256_EXPECTED" =~ ^[0-9a-f]{64}$ ]]; then
+                echo "[-] Error: --sha256 expects a 64-character hexadecimal SHA-256 checksum." >&2
+                exit 1
+            fi
+            shift 2 ;;
         -v|--version)  echo "dopt $DOPT_VERSION"; exit 0 ;;
         -h|--help)     show_help; exit 0 ;;
         *) echo "[-] Unknown option: $1" >&2; show_help; exit 1 ;;
@@ -155,6 +162,14 @@ fi
 # 2. Secure environment validation hooks & Path Resolution
 REAL_USER="${SUDO_USER:-$(id -un)}"
 USER_HOME=$(getent passwd "$REAL_USER" | cut -d: -f6)
+# Where an existing system-wide install would live (checked when installing locally)
+GLOBAL_OPT_DIR="/opt"
+DOPT_TEST_ROOT="${DOPT_TEST_ROOT:-}"
+
+if [[ -n "$DOPT_TEST_ROOT" && "$GLOBAL_INSTALL" = true ]]; then
+    echo "[-] Error: DOPT_TEST_ROOT (test mode) cannot be combined with --global." >&2
+    exit 1
+fi
 
 if [ "$GLOBAL_INSTALL" = true ]; then
     if [[ $EUID -ne 0 ]]; then
@@ -172,7 +187,14 @@ else
     OPT_DIR="$USER_HOME/.local/opt"
     BIN_LINK_DIR="$USER_HOME/.local/bin"
     DESKTOP_DIR="$USER_HOME/.local/share/applications"
-    
+    # Test mode (tests/run.sh): keep every write inside a throwaway root instead of the real home
+    if [[ -n "$DOPT_TEST_ROOT" ]]; then
+        OPT_DIR="$DOPT_TEST_ROOT/opt"
+        BIN_LINK_DIR="$DOPT_TEST_ROOT/bin"
+        DESKTOP_DIR="$DOPT_TEST_ROOT/applications"
+        GLOBAL_OPT_DIR="$DOPT_TEST_ROOT/global-opt"
+    fi
+
     mkdir -p "$OPT_DIR" "$BIN_LINK_DIR" "$DESKTOP_DIR"
 fi
 
@@ -242,8 +264,8 @@ DEF_ICON_MANIFEST=""
 DEF_CATEGORIES=""
 APPEND_LOCAL_NAME=false
 
-if [ "$GLOBAL_INSTALL" = false ] && [[ -d "/opt/$APP_ID" ]]; then
-    echo -e "\n[!] Found existing system-wide installation of $APP_ID at /opt/$APP_ID."
+if [ "$GLOBAL_INSTALL" = false ] && [[ -d "$GLOBAL_OPT_DIR/$APP_ID" ]]; then
+    echo -e "\n[!] Found existing system-wide installation of $APP_ID at $GLOBAL_OPT_DIR/$APP_ID."
     echo "    1) Elevate privileges to update the global installation"
     echo "    2) Proceed with an isolated local installation"
     echo "    3) Abort"
@@ -281,41 +303,106 @@ if [ "$GLOBAL_INSTALL" = false ] && [[ -d "/opt/$APP_ID" ]]; then
 fi
 
 # 3.5 Source Validation & Recovery
+expand_home() {
+    if [[ "$1" == "~"* ]]; then
+        printf '%s' "${1/\~/$USER_HOME}"
+    else
+        printf '%s' "$1"
+    fi
+}
+
+# The real user's downloads folder (XDG, so renamed/translated folders work)
+downloads_dir() {
+    local dir=""
+    if [[ -n "$DOPT_TEST_ROOT" ]]; then
+        echo "$DOPT_TEST_ROOT/Downloads"
+        return
+    fi
+    if command -v xdg-user-dir >/dev/null 2>&1; then
+        if [[ $EUID -eq 0 ]]; then
+            dir=$(sudo -u "$REAL_USER" xdg-user-dir DOWNLOAD 2>/dev/null || true)
+        else
+            dir=$(xdg-user-dir DOWNLOAD 2>/dev/null || true)
+        fi
+    fi
+    # xdg-user-dir falls back to $HOME when no downloads folder is configured
+    if [[ -z "$dir" || "$dir" == "$USER_HOME" || "$dir" == "$HOME" ]]; then
+        dir="$USER_HOME/Downloads"
+    fi
+    echo "$dir"
+}
+
+# "2 days ago" style age for an epoch timestamp
+age_text() {
+    local secs=$(( $(date +%s) - ${1%.*} ))
+    (( secs < 0 )) && secs=0
+    if (( secs < 3600 )); then echo "$(( secs / 60 )) min ago"
+    elif (( secs < 86400 )); then echo "$(( secs / 3600 )) h ago"
+    elif (( secs < 86400 * 14 )); then echo "$(( secs / 86400 )) days ago"
+    else echo "$(( secs / 604800 )) weeks ago"
+    fi
+}
+
 if [ "$DOWNLOAD" = false ] && [[ -z "$FILE_PATH" ]]; then
-    [[ "$SEARCH_DIR" == "~"* ]] && SEARCH_DIR="${SEARCH_DIR/\~/$USER_HOME}"
-    LATEST_TARBALL=$(ls -t -- "$SEARCH_DIR"/*"${APP_ID}"*.tar.gz 2>/dev/null | head -n 1 || true)
-    if [[ -z "$LATEST_TARBALL" ]]; then
-        echo -e "\n[-] Could not automatically find a package matching '*${APP_ID}*.tar.gz' in '$SEARCH_DIR'."
-        echo "[?] How would you like to provide the application payload?"
-        echo "    1) Provide a direct download URL"
-        echo "    2) Provide the exact local file path"
-        echo "    3) Abort"
-        read -r -p "[?] Choose an action [1-3]: " source_res
-        case "$source_res" in
-            1)
+    if [ "$FORCE_INSTALL" = true ]; then
+        echo "[-] Error: No archive given. Pass -f <file>, -u <url> or -d." >&2
+        exit 1
+    fi
+
+    DL_DIR=$(downloads_dir)
+    RECENT_FILES=()
+    RECENT_TIMES=()
+    if [[ -d "$DL_DIR" ]]; then
+        while IFS=$'\t' read -r mtime path; do
+            RECENT_TIMES+=("$mtime")
+            RECENT_FILES+=("$path")
+        done < <(find "$DL_DIR" -maxdepth 1 -type f \( -name '*.tar.gz' -o -name '*.tgz' \) -printf '%T@\t%p\n' 2>/dev/null | sort -rn | head -n 5)
+    fi
+
+    echo -e "\n[?] No archive given."
+    if [[ ${#RECENT_FILES[@]} -gt 0 ]]; then
+        echo "    Recent downloads in $DL_DIR:"
+        for i in "${!RECENT_FILES[@]}"; do
+            printf '    %d) %s  (%s)\n' "$((i + 1))" "$(basename "${RECENT_FILES[$i]}")" "$(age_text "${RECENT_TIMES[$i]}")"
+        done
+    fi
+    echo "    u) Enter a URL   p) Enter a path   a) Abort"
+    if [[ ${#RECENT_FILES[@]} -gt 0 ]]; then
+        read -r -p "[?] Choose [1-${#RECENT_FILES[@]}/u/p/a]: " source_res
+    else
+        read -r -p "[?] Choose [u/p/a]: " source_res
+    fi
+
+    if [[ "$source_res" =~ ^[0-9]+$ ]] && (( source_res >= 1 && source_res <= ${#RECENT_FILES[@]} )); then
+        FILE_PATH="${RECENT_FILES[$((source_res - 1))]}"
+        echo "[*] Using $FILE_PATH"
+    else
+        case "${source_res,,}" in
+            u)
                 read -r -p "[?] Enter full URL (e.g. https://...): " CUSTOM_URL
                 [[ -z "$CUSTOM_URL" ]] && { echo "[-] URL cannot be empty."; exit 1; }
                 DOWNLOAD=true
                 ;;
-            2)
-                read -r -p "[?] Enter exact local file path: " FILE_PATH
-                [[ -z "$FILE_PATH" ]] && { echo "[-] Path cannot be empty."; exit 1; }
-                [[ "$FILE_PATH" == "~"* ]] && FILE_PATH="${FILE_PATH/\~/$USER_HOME}"
-                if [[ ! -f "$FILE_PATH" ]]; then 
-                    echo "[-] Path fault: Target file missing: $FILE_PATH" >&2; exit 1
+            p)
+                # -e enables Tab completion for the path
+                read -r -e -p "[?] Enter the archive path: " FILE_PATH
+                # Paths pasted from a file manager often come wrapped in quotes
+                if [[ "$FILE_PATH" =~ ^\'(.*)\'$ || "$FILE_PATH" =~ ^\"(.*)\"$ ]]; then
+                    FILE_PATH="${BASH_REMATCH[1]}"
                 fi
+                [[ -z "$FILE_PATH" ]] && { echo "[-] Path cannot be empty."; exit 1; }
                 ;;
             *)
                 echo "[-] Deployment aborted."
                 exit 1
                 ;;
         esac
-    else
-        TARBALL_SCANNED="$LATEST_TARBALL"
     fi
-elif [[ -n "$FILE_PATH" ]]; then
-    [[ "$FILE_PATH" == "~"* ]] && FILE_PATH="${FILE_PATH/\~/$USER_HOME}"
-    if [[ ! -f "$FILE_PATH" ]]; then 
+fi
+
+if [[ -n "$FILE_PATH" ]]; then
+    FILE_PATH=$(expand_home "$FILE_PATH")
+    if [[ ! -f "$FILE_PATH" ]]; then
         echo "[-] Path fault: Target file missing: $FILE_PATH" >&2; exit 1
     fi
 fi
@@ -615,13 +702,14 @@ preserve_download() {
 }
 
 print_resume_hint() {
-    local sudo_prefix=""
+    local sudo_prefix="" sha_hint=""
+    [[ -n "$SHA256_EXPECTED" ]] && sha_hint=" --sha256 $SHA256_EXPECTED"
     [[ "$GLOBAL_INSTALL" = true ]] && sudo_prefix="sudo "
     echo "[!] To apply this update later without re-downloading, run:"
     if [[ -n "${MANIFEST:-}" && -f "${MANIFEST:-}" ]]; then
-        echo "    ${sudo_prefix}./dopt.sh -m \"$MANIFEST\" -f \"$1\"${SYMLINK_HINT:-}"
+        echo "    ${sudo_prefix}./dopt.sh -m \"$MANIFEST\" -f \"$1\"${SYMLINK_HINT:-}${sha_hint}"
     else
-        echo "    ${sudo_prefix}./dopt.sh -a \"$APP_ID\" -f \"$1\"${SYMLINK_HINT:-}"
+        echo "    ${sudo_prefix}./dopt.sh -a \"$APP_ID\" -f \"$1\"${SYMLINK_HINT:-}${sha_hint}"
     fi
 }
 
@@ -673,13 +761,22 @@ if [ "$DOWNLOAD" = true ]; then
         echo "[-] Error: Download gateway failed. Verify network routing or destination URL." >&2
         exit 1
     fi
-elif [[ -n "$FILE_PATH" ]]; then
-    TARBALL="$FILE_PATH"
 else
-    TARBALL="${TARBALL_SCANNED:-}"
-    if [[ -z "$TARBALL" ]]; then
-        echo "[-] Critical Fault: Scanned tarball reference lost." >&2; exit 1
+    TARBALL="$FILE_PATH"
+fi
+
+# Optional integrity check (--sha256), before anything is extracted
+if [[ -n "$SHA256_EXPECTED" ]]; then
+    SHA256_ACTUAL=$(sha256sum -- "$TARBALL" | cut -d' ' -f1)
+    if [[ "$SHA256_ACTUAL" != "$SHA256_EXPECTED" ]]; then
+        # A mismatched download must never be kept or offered for resuming
+        [ "$DOWNLOAD" = true ] && rm -f -- "$TARBALL"
+        echo "[-] Error: SHA-256 mismatch. The archive was not installed." >&2
+        echo "    Expected: $SHA256_EXPECTED" >&2
+        echo "    Actual:   $SHA256_ACTUAL" >&2
+        exit 1
     fi
+    echo "[+] SHA-256 verified."
 fi
 
 # 6. Unpack and Parse Sandbox Interior
@@ -920,7 +1017,7 @@ if [ "$DOWNLOAD" = true ]; then
         echo "[i] Local installation backup kept at: $KEPT_FILE"
     fi
 elif [ "$CLEANUP" = true ] && [[ -f "$TARBALL" ]]; then
-    # Local archive (-f or scanned): ask before deleting the user's file, unless -i
+    # Local archive (-f, typed or picked): ask before deleting the user's file, unless -i
     del_res="y"
     if [ "$FORCE_INSTALL" = false ]; then
         read -r -p "[?] Delete the installer archive $TARBALL? [Y/n]: " del_res

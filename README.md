@@ -12,12 +12,12 @@
 - **Desktop Integration:** Automatically creates `.desktop` files for GUI applications and binds them to icons found within the package.
 - **Process Management:** Detects if the target application is running, safely terminates it before upgrading, and prompts to launch the app after deployment.
 - **Graceful Aborts:** Any unexpected failure or cancellation post-download will automatically rescue the payload and generate a fast-resume command.
-- **Interactive Recovery:** If a local package scan fails, it doesn't just crash—it prompts you to dynamically provide a URL or exact path instead.
+- **Optional Checksums:** Pass `--sha256 <hash>` to verify an archive against the checksum its vendor publishes.
 - **Conflict Resolution:** Safely detects when you try to update a global app locally, offering to auto-escalate with `sudo` or safely isolate the new local desktop shortcut.
 - **Smart Updates:** When updating interactively, `dopt` reads the previous installation's command link and desktop shortcut to auto-populate the setup wizard.
 - **App Discovery:** If you forgot the App ID for an update, type `?` in the wizard to list the apps `dopt` installed (and any other folders in your opt directory).
 - **Safe Updates:** New versions are staged and verified before being swapped in, with automatic rollback on failure. `dopt` never touches package-managed folders or commands it didn't create.
-- **Flexible Deployments:** Install straight from a network URL, from a local archive file, or let `dopt` scan a directory for the latest matching version.
+- **Flexible Deployments:** Install straight from a network URL or a local archive file. Give no source and `dopt` lists your recent downloads to pick from.
 
 ## Prerequisites
 `dopt` relies on standard Unix utilities, but specifically requires:
@@ -71,11 +71,13 @@ If no manifest is provided, `dopt` will launch an **Interactive Wizard** to guid
 - `-d, --download`: Download the archive using the manifest's default server endpoint.
 - `-u, --url <url>`: Download using a specific direct link, overriding the manifest.
 - `-f, --file <path>`: Directly deploy from a local archive file (e.g., `app-1.0.tar.gz`).
-- `-p, --path <dir>`: Scan a specific directory for the newest matching local archive.
+- `--sha256 <hash>`: *(Optional)* Verify the archive's SHA-256 checksum before installing. A mismatched download is discarded.
+
+**No archive given?** If you pass none of `-d`, `-u` or `-f`, `dopt` lists the newest archives in your downloads folder and lets you pick one, enter a URL, or type a path (with Tab completion). It never guesses a file on its own. With `-i`, it stops and asks you to pass a source instead. (`-p` was removed in 2.0.)
 
 **Modifiers:**
 - `-g, --global`: Install the application system-wide to `/opt` (requires `sudo`).
-- `-c, --cleanup`: After a successful setup, delete the archive: a download is simply not kept, and a local archive (`-f` or scanned) is deleted after a confirmation prompt (no prompt with `-i`).
+- `-c, --cleanup`: After a successful setup, delete the archive: a download is simply not kept, and a local archive (`-f`, picked or typed) is deleted after a confirmation prompt (no prompt with `-i`).
 - `-i, --install`: Skip `dopt`'s confirmation prompts. If the app is running, it is terminated automatically and relaunched after the update. Anything that would need a decision (replacing an unregistered folder, a command-name clash) aborts instead. The wizard still asks its setup questions; use a manifest for fully unattended runs.
 - `-v, --version`: Show the `dopt` version.
 - `-h, --help`: Show the help menu.
@@ -111,9 +113,9 @@ If an update is aborted after a download (e.g., to keep a running app open, or d
 sudo ./dopt.sh -g -m examples/example-manifest.json -f ~/Downloads/my-app-latest.tar.gz
 ```
 
-**3. Scan the `~/Downloads` folder for the newest release and clean up the archive after:**
+**3. Pick a recent download, verify its checksum, and delete the archive after:**
 ```bash
-./dopt.sh -m examples/example-manifest.json -p ~/Downloads -c
+./dopt.sh -m examples/example-manifest.json --sha256 <checksum-from-vendor> -c
 ```
 
 **4. Interactive Install (No Manifest):**
@@ -164,6 +166,14 @@ The manifest is a JSON file that defines the application parameters. See `exampl
 > - You must 100% trust the source `URL` you provide.
 > - You are responsible for verifying the integrity of any `manifest.json` file you download from the internet.
 > - You are responsible for verifying the integrity of local `.tar.gz` archives before passing them to `dopt`.
+
+## Running the tests
+
+```bash
+./tests/run.sh
+```
+
+The test script installs throwaway apps into a temporary folder (it never touches your real `~/.local`), runs the main install, update, recovery and safety scenarios, and prints a pass/fail summary. Download tests need `python3`; `shellcheck` and `desktop-file-validate` checks run if those tools are installed.
 
 ## Limitations & Future Work
 
