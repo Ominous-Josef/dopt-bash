@@ -84,10 +84,12 @@ When you run `dopt` with a new `.tar.gz` payload, as long as the `app_id` matche
 
 Updates are swapped in atomically: the new version is staged next to the old one and verified first, and if anything fails mid-update the previous installation is restored. `dopt` only ever installs into, and replaces, `<opt dir>/<app_id>` (`~/.local/opt/<app_id>` or `/opt/<app_id>`).
 
-**Ownership:** every install contains a small `.dopt` marker file, which tells `dopt` the folder is its own:
-- Folders with the marker are upgraded normally.
-- Folders owned by a system package (RPM or deb) are never touched. `dopt` names the package and suggests either a different App ID (to install alongside it) or removing the package first.
-- Folders with neither (for example, installs made by older versions of `dopt`) trigger a one-time "Replace it?" prompt. With `-i`, `dopt` refuses instead of asking.
+**Ownership:** `dopt` keeps a small registry in a hidden `.dopt` folder (`~/.local/opt/.dopt/` or `/opt/.dopt/`), with one file per installed app. App folders themselves are left exactly as the vendor shipped them.
+- Folders owned by a system package (RPM or deb) are never touched, even if registered. `dopt` names the package and suggests either a different App ID (to install alongside it) or removing the package first.
+- Registered folders are upgraded normally. Each entry records the folder's identity (inode and creation time), so if the folder was deleted and recreated by something else, it no longer counts as registered.
+- Anything else (for example, installs made by older versions of `dopt`) triggers a one-time "Replace it?" prompt that shows the folder's size and contents. With `-i`, `dopt` refuses instead of asking.
+
+Type `?` at the wizard's App ID prompt to see registered apps, plus any other folders in your opt directory.
 
 **Command-name clashes:** `dopt` never overwrites a file in `~/.local/bin` or `/usr/local/bin` that it didn't create, and warns when the name already exists elsewhere on your `PATH` (for example `git`). You can pick a different name on the spot, continue anyway when the name only exists elsewhere on `PATH`, or abort. With `-i`, it aborts. Use `-s <name>` to set the name up front.
 

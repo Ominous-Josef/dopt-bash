@@ -66,19 +66,21 @@ manifest_get() {
     jq -r --arg k "$1" '.[$k] // empty' "$MANIFEST"
 }
 
-# Sets OWNER_PKG/OWNER_TOOL if a system package owns the directory (or a few files inside it)
+# Sets OWNER_PKG/OWNER_TOOL if a system package owns the directory or a sample of files inside it
 package_owner() {
-    local f out
+    local samples
     OWNER_PKG=""
     OWNER_TOOL=""
-    while IFS= read -r f; do
-        if command -v rpm >/dev/null 2>&1 && out=$(rpm -qf --qf '%{NAME}\n' -- "$f" 2>/dev/null); then
-            OWNER_PKG=$(head -n 1 <<< "$out"); OWNER_TOOL="dnf"; return 0
-        fi
-        if command -v dpkg >/dev/null 2>&1 && out=$(dpkg -S -- "$f" 2>/dev/null); then
-            OWNER_PKG=$(head -n 1 <<< "$out" | cut -d: -f1 | cut -d, -f1); OWNER_TOOL="apt"; return 0
-        fi
-    done < <({ printf '%s\n' "$1"; find "$1" -maxdepth 2 -type f 2>/dev/null | head -n 5; })
+    mapfile -t samples < <({ printf '%s\n' "$1"; find "$1" -maxdepth 3 -type f 2>/dev/null | head -n 20; })
+    if command -v rpm >/dev/null 2>&1; then
+        # Owned paths print a bare package name; unowned ones print a sentence (contains spaces)
+        OWNER_PKG=$(rpm -qf --qf '%{NAME}\n' -- "${samples[@]}" 2>/dev/null | grep -v ' ' | head -n 1 || true)
+        [[ -n "$OWNER_PKG" ]] && { OWNER_TOOL="dnf"; return 0; }
+    fi
+    if command -v dpkg >/dev/null 2>&1; then
+        OWNER_PKG=$(dpkg -S -- "${samples[@]}" 2>/dev/null | grep -v '^diversion' | head -n 1 | cut -d: -f1 | cut -d, -f1 || true)
+        [[ -n "$OWNER_PKG" ]] && { OWNER_TOOL="apt"; return 0; }
+    fi
     return 1
 }
 
@@ -138,6 +140,18 @@ else
     mkdir -p "$OPT_DIR" "$BIN_LINK_DIR" "$DESKTOP_DIR"
 fi
 
+# Registry of dopt installs: one small file per app, kept outside the app folders
+REGISTRY_DIR="$OPT_DIR/.dopt"
+
+# Identity of a folder: inode + birth time, unchanged by renames but new if the folder is recreated
+folder_identity() {
+    stat -c '%i:%W' -- "$1" 2>/dev/null || true
+}
+
+registry_get() {
+    sed -n "s/^$2=//p" "$REGISTRY_DIR/$1" 2>/dev/null | head -n 1 || true
+}
+
 # 3. Resolve App ID
 if [[ -n "$MANIFEST" && -f "$MANIFEST" ]]; then
     APP_ID=$(manifest_get app_id)
@@ -150,10 +164,29 @@ else
         while true; do
             read -r -p "[?] Enter App ID (e.g. com.example.app): " APP_ID
             if [[ "$APP_ID" == "?" ]]; then
-                echo -e "\n--- Installed Applications in $OPT_DIR ---"
-                for dir in "$OPT_DIR"/*/; do
-                    [[ -d "$dir" ]] && echo "- $(basename "$dir")"
+                echo -e "\n--- Installed by dopt in $OPT_DIR ---"
+                found_any=false
+                for entry in "$REGISTRY_DIR"/*; do
+                    [[ -f "$entry" ]] || continue
+                    found_any=true
+                    entry_id=$(basename "$entry")
+                    if [[ -d "$OPT_DIR/$entry_id" ]]; then
+                        echo "- $entry_id"
+                    else
+                        echo "- $entry_id (folder missing)"
+                    fi
                 done
+                [[ "$found_any" = false ]] && echo "  (none registered yet)"
+                other_dirs=()
+                for dir in "$OPT_DIR"/*/; do
+                    [[ -d "$dir" ]] || continue
+                    dir_id=$(basename "$dir")
+                    [[ -f "$REGISTRY_DIR/$dir_id" ]] || other_dirs+=("$dir_id")
+                done
+                if [[ ${#other_dirs[@]} -gt 0 ]]; then
+                    echo "--- Other folders (not registered; older dopt installs or manual) ---"
+                    printf -- '- %s\n' "${other_dirs[@]}"
+                fi
                 echo -e "--------------------------------------\n"
             else
                 break
@@ -364,18 +397,27 @@ path_is_inside() {
     [[ "$resolved" == "$(readlink -m -- "$2")/"* ]]
 }
 
-# 4. Ownership: only upgrade folders dopt created (marked with .dopt), never package-managed ones
-MARKER_NAME=".dopt"
+# 4. Ownership: never touch package-managed folders; only upgrade registered dopt installs without asking
 echo "[*] Auditing environment path structures for $APP_NAME..."
-if [[ -d "$INSTALL_DIR" && ! -f "$INSTALL_DIR/$MARKER_NAME" ]]; then
-    if package_owner "$INSTALL_DIR"; then
-        echo "[-] Error: $INSTALL_DIR belongs to the system package '$OWNER_PKG'. dopt won't modify package-managed files." >&2
-        echo "[i] To use the tarball version, either install it alongside with a different App ID," >&2
-        echo "    or remove the package first: sudo $OWNER_TOOL remove $OWNER_PKG" >&2
-        exit 1
+if [[ -d "$INSTALL_DIR" ]] && package_owner "$INSTALL_DIR"; then
+    echo "[-] Error: $INSTALL_DIR belongs to the system package '$OWNER_PKG'. dopt won't modify package-managed files." >&2
+    echo "[i] To use the tarball version, either install it alongside with a different App ID," >&2
+    echo "    or remove the package first: sudo $OWNER_TOOL remove $OWNER_PKG" >&2
+    exit 1
+fi
+
+REGISTERED_ID=$(registry_get "$APP_ID" folder_id)
+if [[ -d "$INSTALL_DIR" && ( -z "$REGISTERED_ID" || "$REGISTERED_ID" != "$(folder_identity "$INSTALL_DIR")" ) ]]; then
+    if [[ -n "$REGISTERED_ID" ]]; then
+        echo -e "\n[!] $INSTALL_DIR was replaced or recreated since dopt installed it."
+    else
+        echo -e "\n[!] $INSTALL_DIR exists but isn't registered as a dopt install."
+        echo "    Installs made by older versions of dopt ask this once."
     fi
-    echo -e "\n[!] $INSTALL_DIR exists but wasn't installed by dopt (no $MARKER_NAME marker)."
-    echo "    Installs made by older versions of dopt ask this once."
+    entry_count=$(find "$INSTALL_DIR" -mindepth 1 -maxdepth 1 2>/dev/null | wc -l)
+    echo "    Size: $(du -sh -- "$INSTALL_DIR" 2>/dev/null | cut -f1), $entry_count top-level entries:"
+    find "$INSTALL_DIR" -mindepth 1 -maxdepth 1 -printf '      %f\n' 2>/dev/null | sort | head -n 8 || true
+    [[ "$entry_count" -gt 8 ]] && echo "      ..."
     if [ "$FORCE_INSTALL" = true ]; then
         echo "[-] Error: Refusing to replace it in forced (-i) mode. Re-run without -i to confirm." >&2
         exit 1
@@ -668,13 +710,16 @@ fi
 
 # Swap: live -> backup, staged -> live, then drop the backup. The exit trap restores the backup on failure.
 assert_managed_dir "$INSTALL_DIR"
-printf 'app_id=%s\n' "$APP_ID" > "$STAGE_DIR/$MARKER_NAME"
 echo "[*] Swapping in the new version to clear stale libraries..."
 if [[ -e "$INSTALL_DIR" ]]; then
     mv -- "$INSTALL_DIR" "$BACKUP_DIR"
 fi
 mv -- "$STAGE_DIR" "$INSTALL_DIR"
 rm -rf -- "$BACKUP_DIR"
+
+# Register the install (identity of the folder now in place)
+mkdir -p "$REGISTRY_DIR"
+printf 'app_id=%s\nfolder_id=%s\ninstalled=%s\n' "$APP_ID" "$(folder_identity "$INSTALL_DIR")" "$(date -Is)" > "$REGISTRY_DIR/$APP_ID"
 
 REAL_BINARY="$INSTALL_DIR/$BINARY_REL_PATH"
 
