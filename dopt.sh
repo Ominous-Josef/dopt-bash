@@ -1,11 +1,13 @@
 #!/usr/bin/env bash
 # dopt - Directory Optional Package Manager engine for standalone Linux software.
 # Author: Ominous-Josef
-# Version: 1.0.1
+# Version: 2.0.0
 # License: GPLv3
 # Description: A lightweight, manifest-driven package manager for standalone Linux tarballs.
 
 set -euo pipefail
+
+DOPT_VERSION="2.0.0"
 
 # Default flag parameters
 MANIFEST=""
@@ -20,7 +22,7 @@ RESTART_REQD=false
 GLOBAL_INSTALL=false
 
 show_help() {
-    echo "dopt - Dynamic Optional Package Manager"
+    echo "dopt $DOPT_VERSION - Directory Optional Package Manager"
     echo "Usage: ./dopt.sh [options]"
     echo ""
     echo "Manifest (Optional):"
@@ -38,6 +40,7 @@ show_help() {
     echo "  -g, --global            Install system-wide to /opt (requires sudo)"
     echo "  -c, --cleanup           Delete the downloaded or local archive after a successful setup"
     echo "  -i, --install           Skip confirmation prompts; auto-terminate and relaunch a running app"
+    echo "  -v, --version           Show the dopt version"
     echo "  -h, --help              Show this help menu"
     echo ""
     echo "Documentation & Examples:"
@@ -130,6 +133,7 @@ while [[ $# -gt 0 ]]; do
         -u|--url)      DOWNLOAD=true; CUSTOM_URL="$2"; shift 2 ;;
         -f|--file)     FILE_PATH="$2"; shift 2 ;;
         -p|--path)     SEARCH_DIR="$2"; shift 2 ;;
+        -v|--version)  echo "dopt $DOPT_VERSION"; exit 0 ;;
         -h|--help)     show_help; exit 0 ;;
         *) echo "[-] Unknown option: $1" >&2; show_help; exit 1 ;;
     esac
@@ -149,7 +153,7 @@ if [[ -n "$MANIFEST" ]]; then
 fi
 
 # 2. Secure environment validation hooks & Path Resolution
-REAL_USER="${SUDO_USER:-$USER}"
+REAL_USER="${SUDO_USER:-$(id -un)}"
 USER_HOME=$(getent passwd "$REAL_USER" | cut -d: -f6)
 
 if [ "$GLOBAL_INSTALL" = true ]; then
@@ -930,15 +934,21 @@ elif [ "$CLEANUP" = true ] && [[ -f "$TARBALL" ]]; then
 fi
 
 # 10. Environment variables reload check for UI relaunch mapping
+# Start the app in the background as the real user, with their graphical session environment
+launch_app() {
+    local launch_env=(env DISPLAY="${DISPLAY:-:0}" WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-}" XDG_RUNTIME_DIR="/run/user/$(id -u "$REAL_USER")")
+    if [[ $EUID -eq 0 ]]; then
+        sudo -u "$REAL_USER" "${launch_env[@]}" nohup "$BIN_LINK" > /dev/null 2>&1 &
+    else
+        "${launch_env[@]}" nohup "$BIN_LINK" > /dev/null 2>&1 &
+    fi
+}
+
 if [[ "$CLI_ONLY" != "true" ]]; then
     if [ "$FORCE_INSTALL" = true ]; then
         if [ "$RESTART_REQD" = true ]; then
             echo "[*] Auto-relaunching application window environment..."
-            if [[ $EUID -eq 0 ]]; then
-                sudo -u "$REAL_USER" env DISPLAY="${DISPLAY:-:0}" WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-}" XDG_RUNTIME_DIR="/run/user/$(id -u "$REAL_USER")" nohup "$BIN_LINK" > /dev/null 2>&1 &
-            else
-                env DISPLAY="${DISPLAY:-:0}" WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-}" XDG_RUNTIME_DIR="/run/user/$(id -u "$REAL_USER")" nohup "$BIN_LINK" > /dev/null 2>&1 &
-            fi
+            launch_app
             echo "[+] Application successfully brought back online."
         fi
     else
@@ -946,11 +956,7 @@ if [[ "$CLI_ONLY" != "true" ]]; then
         read -r -p "[?] Deployment complete. Would you like to launch $APP_NAME now? [Y/n]: " launch_ans
         if [[ ! "${launch_ans,,}" =~ ^(no|n) ]]; then
             echo "[*] Launching application..."
-            if [[ $EUID -eq 0 ]]; then
-                sudo -u "$REAL_USER" env DISPLAY="${DISPLAY:-:0}" WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-}" XDG_RUNTIME_DIR="/run/user/$(id -u "$REAL_USER")" nohup "$BIN_LINK" > /dev/null 2>&1 &
-            else
-                env DISPLAY="${DISPLAY:-:0}" WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-}" XDG_RUNTIME_DIR="/run/user/$(id -u "$REAL_USER")" nohup "$BIN_LINK" > /dev/null 2>&1 &
-            fi
+            launch_app
             echo "[+] Application successfully launched."
         fi
     fi

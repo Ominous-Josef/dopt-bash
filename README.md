@@ -1,10 +1,10 @@
-# dopt - Dynamic Optional Package Manager
+# dopt - Directory Optional Package Manager
 
 > **The Backstory:** I use Fedora, and most of the standalone apps I use come packaged as `.tar.gz` archives. This means that whenever there is an update, I have to manually go through the entire extraction and installation process all over again, which gets frustrating. I made this script to help me install and update those apps automatically. I don't know if anyone else has this exact issue, but if you do, I hope this helps you!
 > 
 > *Note: For those in need of something a bit more sophisticated, I created a repo for the main dopt project in Golang over at [Ominous-Josef/dopt](https://github.com/Ominous-Josef/dopt).*
 
-`dopt` is a lightweight, manifest-driven package manager engine that strictly installs standalone Linux software into the `/opt` directory. It automates downloading, extracting, installing to `/opt`, linking binaries to `/usr/local/bin`, and setting up desktop integration in `/usr/share/applications` for apps distributed as tarballs.
+`dopt` is a small, manifest-driven helper for installing and updating standalone Linux apps that ship as `.tar.gz` archives: the unofficial tarballs no package manager tracks. It downloads (or picks up) the archive, installs it into an opt folder (`~/.local/opt` by default, or `/opt` system-wide), links a command into your `PATH`, and creates a desktop shortcut. It works alongside your system package manager, not instead of it.
 
 ## Features
 - **JSON Manifest Driven:** Configuration is entirely externalized to simple JSON files.
@@ -15,7 +15,8 @@
 - **Interactive Recovery:** If a local package scan fails, it doesn't just crash—it prompts you to dynamically provide a URL or exact path instead.
 - **Conflict Resolution:** Safely detects when you try to update a global app locally, offering to auto-escalate with `sudo` or safely isolate the new local desktop shortcut.
 - **Smart Updates:** When updating interactively, `dopt` reads the previous installation's command link and desktop shortcut to auto-populate the setup wizard.
-- **App Discovery:** If you forgot the App ID for an update, type `?` in the wizard to list all packages in your `/opt` folder.
+- **App Discovery:** If you forgot the App ID for an update, type `?` in the wizard to list the apps `dopt` installed (and any other folders in your opt directory).
+- **Safe Updates:** New versions are staged and verified before being swapped in, with automatic rollback on failure. `dopt` never touches package-managed folders or commands it didn't create.
 - **Flexible Deployments:** Install straight from a network URL, from a local archive file, or let `dopt` scan a directory for the latest matching version.
 
 ## Prerequisites
@@ -23,6 +24,8 @@
 - `bash` (4.0+)
 - `curl` (for network downloads)
 - `jq` (**Only required** if using a JSON manifest)
+- Standard GNU/Linux tools: `tar`, `gzip`, coreutils, findutils, `pgrep` (all preinstalled on Fedora and most distributions)
+- *(Optional)* `rpm` or `dpkg`, used to detect package-managed folders, and `desktop-file-validate` to check generated shortcuts
 
 ```bash
 # Example prerequisite installation (Fedora/RHEL)
@@ -73,12 +76,13 @@ If no manifest is provided, `dopt` will launch an **Interactive Wizard** to guid
 **Modifiers:**
 - `-g, --global`: Install the application system-wide to `/opt` (requires `sudo`).
 - `-c, --cleanup`: After a successful setup, delete the archive: a download is simply not kept, and a local archive (`-f` or scanned) is deleted after a confirmation prompt (no prompt with `-i`).
-- `-i, --install`: Skip confirmation prompts. If the app is running, it is terminated automatically and relaunched after the update.
+- `-i, --install`: Skip `dopt`'s confirmation prompts. If the app is running, it is terminated automatically and relaunched after the update. Anything that would need a decision (replacing an unregistered folder, a command-name clash) aborts instead. The wizard still asks its setup questions; use a manifest for fully unattended runs.
+- `-v, --version`: Show the `dopt` version.
 - `-h, --help`: Show the help menu.
 
 ### Updating Applications
 
-Because `dopt` does not maintain a complex internal database, updating an application is functionally identical to installing it. The golden rule is: **Same App ID = Overwrite / Update**.
+Updating an application is the same command as installing it. The golden rule is: **Same App ID = Update**.
 
 When you run `dopt` with a new `.tar.gz` payload, as long as the `app_id` matches the existing installation (either defined in the JSON manifest, passed via `-a`, or typed into the interactive prompt), `dopt` will replace the old installation with the new version. No special update flags are required!
 
@@ -89,13 +93,11 @@ Updates are swapped in atomically: the new version is staged next to the old one
 - Registered folders are upgraded normally. Each entry records the folder's identity (inode and creation time), so if the folder was deleted and recreated by something else, it no longer counts as registered.
 - Anything else (for example, installs made by older versions of `dopt`) triggers a one-time "Replace it?" prompt that shows the folder's size and contents. With `-i`, `dopt` refuses instead of asking.
 
-Type `?` at the wizard's App ID prompt to see registered apps, plus any other folders in your opt directory.
+When updating through the **Interactive Wizard**, your previous answers (name, command name, binary, icon, categories) are pre-filled from the existing install. Type `?` at the wizard's App ID prompt to see registered apps, plus any other folders in your opt directory.
 
 **Command-name clashes:** `dopt` never overwrites a file in `~/.local/bin` or `/usr/local/bin` that it didn't create, and warns when the name already exists elsewhere on your `PATH` (for example `git`). You can pick a different name on the spot, continue anyway when the name only exists elsewhere on `PATH`, or abort. With `-i`, it aborts. Use `-s <name>` to set the name up front.
 
-If you are updating via the **Interactive Wizard**, `dopt` will intelligently scan your system for existing `.desktop` files and symlinks belonging to that App ID, and auto-populate all wizard prompts for a frictionless update experience. If you forgot the App ID you used previously, simply type `?` at the first prompt to see a list of all packages installed in your target installation directory (either `~/.local/opt` or `/opt`).
-
-Additionally, if an update is ever aborted (e.g., to save your work in an actively running app, or due to a sudden permission error), `dopt`'s global error handler will instantly rescue the downloaded payload into your current directory and provide an exact CLI command to resume the update later without re-downloading.
+If an update is aborted after a download (e.g., to keep a running app open, or due to a permission error), `dopt` saves the downloaded archive into your current directory and prints the exact command to resume later without re-downloading. Only valid archives are kept, and existing files are never overwritten: an identical copy is reused, otherwise the archive is saved as `name-1.tar.gz`, `name-2.tar.gz`, and so on.
 
 ### Examples
 
@@ -115,7 +117,7 @@ sudo ./dopt.sh -g -m examples/example-manifest.json -f ~/Downloads/my-app-latest
 ```
 
 **4. Interactive Install (No Manifest):**
-If you don't have a manifest, you can just point `dopt` directly at a tarball. It will launch an interactive setup wizard to ask for the App ID and Name.
+If you don't have a manifest, you can just point `dopt` directly at a tarball. It will launch an interactive setup wizard that asks for the App ID, name, command name and binary.
 ```bash
 ./dopt.sh -f ~/Downloads/some-new-app-linux-x64.tar.gz
 ```
@@ -158,7 +160,7 @@ The manifest is a JSON file that defines the application parameters. See `exampl
 > [!CAUTION]
 > **No Cryptographic Verification:** `dopt` is a deployment engine. It **does not** cryptographically verify signatures or the safety of the payloads it installs. 
 > 
-> Because `dopt` runs with `sudo` privileges to install system-wide applications:
+> `dopt` installs and runs software exactly as provided. In local mode it runs as you; with `--global` it runs as root and writes to `/opt` and `/usr/local/bin`. Either way:
 > - You must 100% trust the source `URL` you provide.
 > - You are responsible for verifying the integrity of any `manifest.json` file you download from the internet.
 > - You are responsible for verifying the integrity of local `.tar.gz` archives before passing them to `dopt`.
@@ -168,3 +170,5 @@ The manifest is a JSON file that defines the application parameters. See `exampl
 - **Archive format:** Currently, `dopt` strictly expects standard `tar.gz` (`.tar.gz`) archives.
 - **Hardcoded paths:** Depending on the mode, core structural paths (`~/.local/opt`, `/opt`, `/usr/local/bin`) are hardcoded into the engine logic.
 - **Install location:** Applications always live in `<opt dir>/<app_id>`; custom install directories are not supported.
+- **Platform:** GNU/Linux only (relies on GNU `find`, `stat` and `readlink`).
+- **Package detection:** Only RPM and dpkg are checked. On other systems, an unregistered folder still triggers the "Replace it?" prompt.
