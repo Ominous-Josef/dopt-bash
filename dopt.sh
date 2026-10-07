@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # dopt - Directory Optional Package Manager engine for standalone Linux software.
 # Author: Ominous-Josef
-# Version: 2.0.0
+# Version: 2.1.0
 # License: GPLv3
 # Description: A lightweight, manifest-driven package manager for standalone Linux tarballs.
 
 set -euo pipefail
 
-DOPT_VERSION="2.0.0"
+DOPT_VERSION="2.1.0"
 
 # Default flag parameters
 MANIFEST=""
@@ -20,6 +20,42 @@ CUSTOM_URL=""
 SYMLINK_CLI=""
 RESTART_REQD=false
 GLOBAL_INSTALL=false
+
+# Output style. Prefixes keep their meaning without color: [n/N] step, [+] success, [!] warning,
+# [-] error (stderr), [?] prompt; details are indented under their step.
+# Color only when the stream is a terminal and NO_COLOR is unset.
+if [[ -t 1 && -z "${NO_COLOR:-}" ]]; then
+    C_BOLD=$'\e[1m'; C_DIM=$'\e[2m'; C_GREEN=$'\e[32m'; C_YELLOW=$'\e[33m'; C_RESET=$'\e[0m'
+else
+    C_BOLD=""; C_DIM=""; C_GREEN=""; C_YELLOW=""; C_RESET=""
+fi
+# Errors and read -p prompts go to stderr, so they follow stderr's terminal state
+if [[ -t 2 && -z "${NO_COLOR:-}" ]]; then
+    E_BOLD=$'\e[1m'; E_RED=$'\e[31m'; E_RESET=$'\e[0m'
+else
+    E_BOLD=""; E_RED=""; E_RESET=""
+fi
+STEP=0
+STEP_TOTAL=0
+
+ui_step()    { STEP=$((STEP + 1)); printf '%s[%d/%d]%s %s\n' "$C_BOLD" "$STEP" "$STEP_TOTAL" "$C_RESET" "$*"; }
+ui_detail()  { printf '      %s%s%s\n' "$C_DIM" "$*" "$C_RESET"; }
+ui_heading() { printf '%s%s%s\n' "$C_BOLD" "$*" "$C_RESET"; }
+# Indented line at normal brightness (summary fields)
+ui_line()    { printf '      %s\n' "$*"; }
+ui_ok()      { printf '%s[+]%s %s\n' "$C_GREEN" "$C_RESET" "$*"; }
+ui_warn()    { printf '%s[!]%s %s\n' "$C_YELLOW" "$C_RESET" "$*"; }
+ui_error()   { printf '%s[-]%s %s\n' "$E_RED" "$E_RESET" "$*" >&2; }
+# Prompt label for read -p: read -r -p "$(ui_ask "Continue? [Y/n]: ")" answer
+ui_ask()     { printf '%s[?]%s %s' "$E_BOLD" "$E_RESET" "$*"; }
+# Show paths under the user's home as ~/...
+ui_path() {
+    if [[ -n "${USER_HOME:-}" && "$1" == "$USER_HOME/"* ]]; then
+        printf '~/%s' "${1#"$USER_HOME"/}"
+    else
+        printf '%s' "$1"
+    fi
+}
 
 show_help() {
     echo "dopt $DOPT_VERSION - Directory Optional Package Manager"
@@ -43,6 +79,9 @@ show_help() {
     echo "  -v, --version           Show the dopt version"
     echo "  -h, --help              Show this help menu"
     echo ""
+    echo "Environment:"
+    echo "  NO_COLOR=1              Disable colored output (color is also off when output isn't a terminal)"
+    echo ""
     echo "Documentation & Examples:"
     echo "  Full documentation: https://github.com/Ominous-Josef/dopt-bash"
     echo "  Manifest template:  See 'examples/example-manifest.json'"
@@ -60,7 +99,7 @@ is_valid_name() {
 validate_name() {
     local label="$1" value="$2"
     if ! is_valid_name "$value"; then
-        echo "[-] CRITICAL: Security abort. Invalid $label '$value' ($NAME_RULES)." >&2
+        ui_error "Invalid $label '$value' ($NAME_RULES)."
         exit 1
     fi
 }
@@ -132,29 +171,29 @@ while [[ $# -gt 0 ]]; do
         -i|--install)  FORCE_INSTALL=true; shift ;;
         -u|--url)      DOWNLOAD=true; CUSTOM_URL="$2"; shift 2 ;;
         -f|--file)     FILE_PATH="$2"; shift 2 ;;
-        -p|--path)     echo "[-] Error: -p was removed in 2.0; pass the archive with -f <file>." >&2; exit 1 ;;
+        -p|--path)     ui_error "-p was removed in 2.0; pass the archive with -f <file>."; exit 1 ;;
         --sha256)
             SHA256_EXPECTED="${2,,}"
             if [[ ! "$SHA256_EXPECTED" =~ ^[0-9a-f]{64}$ ]]; then
-                echo "[-] Error: --sha256 expects a 64-character hexadecimal SHA-256 checksum." >&2
+                ui_error "--sha256 expects a 64-character hexadecimal SHA-256 checksum."
                 exit 1
             fi
             shift 2 ;;
         -v|--version)  echo "dopt $DOPT_VERSION"; exit 0 ;;
         -h|--help)     show_help; exit 0 ;;
-        *) echo "[-] Unknown option: $1" >&2; show_help; exit 1 ;;
+        *) ui_error "Unknown option: $1"; show_help; exit 1 ;;
     esac
 done
 
 if [[ -n "$MANIFEST" ]]; then
     # Verify JSON parser dependencies exist on host
     if ! command -v jq >/dev/null 2>&1; then
-        echo "[-] Error: 'jq' utility is required when using a manifest. Please run: sudo dnf install jq" >&2
+        ui_error "Manifests need 'jq'. Install it with: sudo dnf install jq"
         exit 1
     fi
 
     if [[ ! -f "$MANIFEST" ]]; then
-        echo "[-] Error: Manifest file not found: $MANIFEST" >&2
+        ui_error "Manifest not found: $MANIFEST"
         exit 1
     fi
 fi
@@ -167,13 +206,13 @@ GLOBAL_OPT_DIR="/opt"
 DOPT_TEST_ROOT="${DOPT_TEST_ROOT:-}"
 
 if [[ -n "$DOPT_TEST_ROOT" && "$GLOBAL_INSTALL" = true ]]; then
-    echo "[-] Error: DOPT_TEST_ROOT (test mode) cannot be combined with --global." >&2
+    ui_error "DOPT_TEST_ROOT (test mode) can't be combined with --global."
     exit 1
 fi
 
 if [ "$GLOBAL_INSTALL" = true ]; then
     if [[ $EUID -ne 0 ]]; then
-        echo "[-] Error: Global deployment requires root context. Re-run command using sudo." >&2
+        ui_error "--global installs system-wide and needs root. Re-run with sudo."
         exit 1
     fi
     OPT_DIR="/opt"
@@ -181,7 +220,7 @@ if [ "$GLOBAL_INSTALL" = true ]; then
     DESKTOP_DIR="/usr/share/applications"
 else
     if [[ $EUID -eq 0 ]]; then
-        echo "[-] Error: Local installation should not be run as root. Re-run without sudo, or pass --global for system-wide deployment." >&2
+        ui_error "Don't run a local install as root. Re-run without sudo, or add --global for a system-wide install."
         exit 1
     fi
     OPT_DIR="$USER_HOME/.local/opt"
@@ -213,14 +252,14 @@ registry_get() {
 # 3. Resolve App ID
 if [[ -n "$MANIFEST" && -f "$MANIFEST" ]]; then
     APP_ID=$(manifest_get app_id)
-    [[ -z "$APP_ID" ]] && { echo "[-] Error: Manifest is missing required field 'app_id'." >&2; exit 1; }
+    [[ -z "$APP_ID" ]] && { ui_error "The manifest is missing the required field 'app_id'."; exit 1; }
 else
     APP_ID="${APP_ID_CLI:-}"
     if [[ -z "$APP_ID" ]]; then
-        echo "[*] No manifest provided. Using interactive setup..."
-        echo "[i] Tip: Type '?' to see your currently installed applications."
+        ui_heading "Interactive setup"
+        ui_detail "Tip: type '?' to list installed apps."
         while true; do
-            read -r -p "[?] Enter App ID (e.g. com.example.app): " APP_ID
+            read -r -p "$(ui_ask "Enter App ID (e.g. com.example.app): ")" APP_ID
             if [[ "$APP_ID" == "?" ]]; then
                 echo -e "\n--- Installed by dopt in $OPT_DIR ---"
                 found_any=false
@@ -251,7 +290,7 @@ else
             fi
         done
     fi
-    [[ -z "$APP_ID" ]] && { echo "[-] Error: App ID is required."; exit 1; }
+    [[ -z "$APP_ID" ]] && { ui_error "An App ID is required."; exit 1; }
 fi
 validate_name "App ID" "$APP_ID"
 
@@ -265,14 +304,15 @@ DEF_CATEGORIES=""
 APPEND_LOCAL_NAME=false
 
 if [ "$GLOBAL_INSTALL" = false ] && [[ -d "$GLOBAL_OPT_DIR/$APP_ID" ]]; then
-    echo -e "\n[!] Found existing system-wide installation of $APP_ID at $GLOBAL_OPT_DIR/$APP_ID."
-    echo "    1) Elevate privileges to update the global installation"
-    echo "    2) Proceed with an isolated local installation"
+    echo ""
+    ui_warn "Found existing system-wide installation of $APP_ID at $GLOBAL_OPT_DIR/$APP_ID."
+    echo "    1) Update the system-wide install (re-runs with sudo)"
+    echo "    2) Install a separate local copy"
     echo "    3) Abort"
-    read -r -p "[?] Choose an action [1-3]: " action_res
+    read -r -p "$(ui_ask "Choose an action [1-3]: ")" action_res
     case "$action_res" in
         1)
-            echo "[*] Elevating privileges..."
+            ui_detail "Re-running with sudo..."
             SELF_PATH=$(readlink -f "$0")
             if [[ -z "$MANIFEST" && -z "${APP_ID_CLI:-}" ]]; then
                 exec sudo "$SELF_PATH" -g "${ORIG_ARGS[@]}" -a "$APP_ID"
@@ -281,8 +321,7 @@ if [ "$GLOBAL_INSTALL" = false ] && [[ -d "$GLOBAL_OPT_DIR/$APP_ID" ]]; then
             fi
             ;;
         2)
-            echo "[*] Proceeding with isolated local installation..."
-            read -r -p "[?] To prevent the local app from hiding the global app in your menu, we can append '-local' to the App ID and Name. Do this now? [Y/n]: " rename_res
+            read -r -p "$(ui_ask "Add '-local' to the App ID and name, so this copy doesn't hide the system-wide app in your menu? [Y/n]: ")" rename_res
             if [[ ! "${rename_res,,}" =~ ^(no|n) ]]; then
                 GLOBAL_DESKTOP="/usr/share/applications/${APP_ID}.desktop"
                 if [[ -f "$GLOBAL_DESKTOP" ]]; then
@@ -292,11 +331,11 @@ if [ "$GLOBAL_INSTALL" = false ] && [[ -d "$GLOBAL_OPT_DIR/$APP_ID" ]]; then
                 APP_ID="${APP_ID}-local"
                 validate_name "App ID" "$APP_ID"
                 APPEND_LOCAL_NAME=true
-                echo "[i] App ID updated to: $APP_ID"
+                ui_detail "App ID is now $APP_ID"
             fi
             ;;
         *)
-            echo "[-] Deployment aborted."
+            ui_error "Deployment aborted."
             exit 1
             ;;
     esac
@@ -345,7 +384,7 @@ age_text() {
 
 if [ "$DOWNLOAD" = false ] && [[ -z "$FILE_PATH" ]]; then
     if [ "$FORCE_INSTALL" = true ]; then
-        echo "[-] Error: No archive given. Pass -f <file>, -u <url> or -d." >&2
+        ui_error "No archive given. Pass -f <file>, -u <url> or -d."
         exit 1
     fi
 
@@ -359,7 +398,8 @@ if [ "$DOWNLOAD" = false ] && [[ -z "$FILE_PATH" ]]; then
         done < <(find "$DL_DIR" -maxdepth 1 -type f \( -name '*.tar.gz' -o -name '*.tgz' \) -printf '%T@\t%p\n' 2>/dev/null | sort -rn | head -n 5)
     fi
 
-    echo -e "\n[?] No archive given."
+    echo ""
+    ui_heading "No archive given."
     if [[ ${#RECENT_FILES[@]} -gt 0 ]]; then
         echo "    Recent downloads in $DL_DIR:"
         for i in "${!RECENT_FILES[@]}"; do
@@ -368,32 +408,32 @@ if [ "$DOWNLOAD" = false ] && [[ -z "$FILE_PATH" ]]; then
     fi
     echo "    u) Enter a URL   p) Enter a path   a) Abort"
     if [[ ${#RECENT_FILES[@]} -gt 0 ]]; then
-        read -r -p "[?] Choose [1-${#RECENT_FILES[@]}/u/p/a]: " source_res
+        read -r -p "$(ui_ask "Choose [1-${#RECENT_FILES[@]}/u/p/a]: ")" source_res
     else
-        read -r -p "[?] Choose [u/p/a]: " source_res
+        read -r -p "$(ui_ask "Choose [u/p/a]: ")" source_res
     fi
 
     if [[ "$source_res" =~ ^[0-9]+$ ]] && (( source_res >= 1 && source_res <= ${#RECENT_FILES[@]} )); then
         FILE_PATH="${RECENT_FILES[$((source_res - 1))]}"
-        echo "[*] Using $FILE_PATH"
+        ui_detail "Using $(ui_path "$FILE_PATH")"
     else
         case "${source_res,,}" in
             u)
-                read -r -p "[?] Enter full URL (e.g. https://...): " CUSTOM_URL
-                [[ -z "$CUSTOM_URL" ]] && { echo "[-] URL cannot be empty."; exit 1; }
+                read -r -p "$(ui_ask "Enter full URL (e.g. https://...): ")" CUSTOM_URL
+                [[ -z "$CUSTOM_URL" ]] && { ui_error "The URL can't be empty."; exit 1; }
                 DOWNLOAD=true
                 ;;
             p)
                 # -e enables Tab completion for the path
-                read -r -e -p "[?] Enter the archive path: " FILE_PATH
+                read -r -e -p "$(ui_ask "Enter the archive path: ")" FILE_PATH
                 # Paths pasted from a file manager often come wrapped in quotes
                 if [[ "$FILE_PATH" =~ ^\'(.*)\'$ || "$FILE_PATH" =~ ^\"(.*)\"$ ]]; then
                     FILE_PATH="${BASH_REMATCH[1]}"
                 fi
-                [[ -z "$FILE_PATH" ]] && { echo "[-] Path cannot be empty."; exit 1; }
+                [[ -z "$FILE_PATH" ]] && { ui_error "The path can't be empty."; exit 1; }
                 ;;
             *)
-                echo "[-] Deployment aborted."
+                ui_error "Deployment aborted."
                 exit 1
                 ;;
         esac
@@ -403,7 +443,7 @@ fi
 if [[ -n "$FILE_PATH" ]]; then
     FILE_PATH=$(expand_home "$FILE_PATH")
     if [[ ! -f "$FILE_PATH" ]]; then
-        echo "[-] Path fault: Target file missing: $FILE_PATH" >&2; exit 1
+        ui_error "Archive not found: $FILE_PATH"; exit 1
     fi
 fi
 
@@ -438,7 +478,7 @@ if [[ -n "$MANIFEST" && -f "$MANIFEST" ]]; then
     BINARY_PATTERN=$(manifest_get binary_pattern)
     BINARY_PATH=$(manifest_get binary_path)
     if [[ -z "$BINARY_PATTERN" && -z "$BINARY_PATH" ]]; then
-        echo "[-] Error: Manifest must define 'binary_path' or 'binary_pattern'." >&2
+        ui_error "The manifest must define 'binary_path' or 'binary_pattern'."
         exit 1
     fi
     ICON_PATH_MANIFEST=$(manifest_get icon_path)
@@ -449,21 +489,21 @@ if [[ -n "$MANIFEST" && -f "$MANIFEST" ]]; then
     APP_CATEGORIES=${APP_CATEGORIES:-Utility;}
     EXEC_FLAGS=$(manifest_get exec_flags)
 else
-    [[ -d "$OPT_DIR/$APP_ID" ]] && echo "[*] Existing installation detected. Auto-populating defaults..."
+    [[ -d "$OPT_DIR/$APP_ID" ]] && ui_detail "Existing install found; its settings are the defaults."
     
-    read -r -p "[?] Enter Application Name [${DEF_APP_NAME:-$APP_ID}]: " APP_NAME
+    read -r -p "$(ui_ask "Enter Application Name [${DEF_APP_NAME:-$APP_ID}]: ")" APP_NAME
     APP_NAME=${APP_NAME:-${DEF_APP_NAME:-$APP_ID}}
     
     if [[ -n "$SYMLINK_CLI" ]]; then
         SYMLINK_NAME="$SYMLINK_CLI"
     else
-        read -r -p "[?] Enter executable symlink name [${DEF_SYMLINK_NAME:-$APP_ID}]: " SYMLINK_NAME
+        read -r -p "$(ui_ask "Enter executable symlink name [${DEF_SYMLINK_NAME:-$APP_ID}]: ")" SYMLINK_NAME
         SYMLINK_NAME=${SYMLINK_NAME:-${DEF_SYMLINK_NAME:-$APP_ID}}
     fi
     
     cli_prompt_def="[y/N]"
     [[ "${DEF_CLI_ANS,,}" == "y" ]] && cli_prompt_def="[Y/n]"
-    read -r -p "[?] Is this a CLI-only application? $cli_prompt_def: " cli_ans
+    read -r -p "$(ui_ask "Is this a CLI-only application? $cli_prompt_def: ")" cli_ans
     cli_ans=${cli_ans:-${DEF_CLI_ANS:-n}}
     if [[ "${cli_ans,,}" =~ ^(yes|y) ]]; then
         CLI_ONLY="true"
@@ -473,7 +513,7 @@ else
     
     APP_COMMENT=""
 
-    read -r -p "[?] Enter target binary name or relative path (e.g. bin/app) [${DEF_BINARY_PATTERN:-$SYMLINK_NAME}]: " BINARY_PATTERN
+    read -r -p "$(ui_ask "Enter target binary name or relative path (e.g. bin/app) [${DEF_BINARY_PATTERN:-$SYMLINK_NAME}]: ")" BINARY_PATTERN
     BINARY_PATTERN=${BINARY_PATTERN:-${DEF_BINARY_PATTERN:-$SYMLINK_NAME}}
     BINARY_PATH=""
     if [[ "$BINARY_PATTERN" == */* ]]; then
@@ -483,10 +523,10 @@ else
     
     icon_prompt_def="(leave blank to auto-detect)"
     [[ -n "$DEF_ICON_MANIFEST" ]] && icon_prompt_def="[$DEF_ICON_MANIFEST]"
-    read -r -p "[?] Enter icon file path/name $icon_prompt_def: " ICON_PATH_MANIFEST
+    read -r -p "$(ui_ask "Enter icon file path/name $icon_prompt_def: ")" ICON_PATH_MANIFEST
     ICON_PATH_MANIFEST=${ICON_PATH_MANIFEST:-$DEF_ICON_MANIFEST}
     
-    read -r -p "[?] Enter Desktop Category (e.g. Utility;, Development;, Game;) [${DEF_CATEGORIES:-Utility;}]: " APP_CATEGORIES
+    read -r -p "$(ui_ask "Enter Desktop Category (e.g. Utility;, Development;, Game;) [${DEF_CATEGORIES:-Utility;}]: ")" APP_CATEGORIES
     APP_CATEGORIES=${APP_CATEGORIES:-${DEF_CATEGORIES:-Utility;}}
     [[ -n "$APP_CATEGORIES" && "$APP_CATEGORIES" != *";" ]] && APP_CATEGORIES="${APP_CATEGORIES};"
     
@@ -517,7 +557,7 @@ assert_managed_dir() {
     if [[ "$parent" != "$(readlink -m -- "$OPT_DIR")" ]] ||
        [[ ! "${name#.}" =~ $NAME_REGEX || "$name" == *".."* ]] ||
        [[ "$name" != "$APP_ID" && "$name" != ".${APP_ID}.dopt-new" && "$name" != ".${APP_ID}.dopt-old" ]]; then
-        echo "[-] CRITICAL: Safety abort. Refusing to modify $target (outside dopt's managed directory $OPT_DIR)." >&2
+        ui_error "Safety abort: refusing to modify $target (outside dopt's folder $OPT_DIR)."
         exit 1
     fi
 }
@@ -530,33 +570,38 @@ path_is_inside() {
 }
 
 # 4. Ownership: never touch package-managed folders; only upgrade registered dopt installs without asking
-echo "[*] Auditing environment path structures for $APP_NAME..."
+STEP_TOTAL=3
+[ "$DOWNLOAD" = true ] && STEP_TOTAL=$((STEP_TOTAL + 1))
+[[ "$CLI_ONLY" != "true" ]] && STEP_TOTAL=$((STEP_TOTAL + 1))
+WAS_INSTALLED=false
+[[ -d "$INSTALL_DIR" ]] && WAS_INSTALLED=true
+ui_step "Checking $APP_NAME..."
 if [[ -d "$INSTALL_DIR" ]] && package_owner "$INSTALL_DIR"; then
-    echo "[-] Error: $INSTALL_DIR belongs to the system package '$OWNER_PKG'. dopt won't modify package-managed files." >&2
-    echo "[i] To use the tarball version, either install it alongside with a different App ID," >&2
-    echo "    or remove the package first: sudo $OWNER_TOOL remove $OWNER_PKG" >&2
+    ui_error "$INSTALL_DIR belongs to the system package '$OWNER_PKG'. dopt won't modify package-managed files."
+    echo "      To use the tarball version, install it alongside with a different App ID," >&2
+    echo "      or remove the package first: sudo $OWNER_TOOL remove $OWNER_PKG" >&2
     exit 1
 fi
 
 REGISTERED_ID=$(registry_get "$APP_ID" folder_id)
 if [[ -d "$INSTALL_DIR" && ( -z "$REGISTERED_ID" || "$REGISTERED_ID" != "$(folder_identity "$INSTALL_DIR")" ) ]]; then
     if [[ -n "$REGISTERED_ID" ]]; then
-        echo -e "\n[!] $INSTALL_DIR was replaced or recreated since dopt installed it."
+        ui_warn "$(ui_path "$INSTALL_DIR") was replaced or recreated since dopt installed it."
     else
-        echo -e "\n[!] $INSTALL_DIR exists but isn't registered as a dopt install."
-        echo "    Installs made by older versions of dopt ask this once."
+        ui_warn "$(ui_path "$INSTALL_DIR") exists but isn't registered as a dopt install."
+        ui_detail "Installs made by older versions of dopt ask this once."
     fi
     entry_count=$(find "$INSTALL_DIR" -mindepth 1 -maxdepth 1 2>/dev/null | wc -l)
-    echo "    Size: $(du -sh -- "$INSTALL_DIR" 2>/dev/null | cut -f1), $entry_count top-level entries:"
-    find "$INSTALL_DIR" -mindepth 1 -maxdepth 1 -printf '      %f\n' 2>/dev/null | sort | head -n 8 || true
-    [[ "$entry_count" -gt 8 ]] && echo "      ..."
+    ui_detail "Size: $(du -sh -- "$INSTALL_DIR" 2>/dev/null | cut -f1), $entry_count top-level entries:"
+    find "$INSTALL_DIR" -mindepth 1 -maxdepth 1 -printf '        %f\n' 2>/dev/null | sort | head -n 8 || true
+    [[ "$entry_count" -gt 8 ]] && echo "        ..."
     if [ "$FORCE_INSTALL" = true ]; then
-        echo "[-] Error: Refusing to replace it in forced (-i) mode. Re-run without -i to confirm." >&2
+        ui_error "Refusing to replace it in forced (-i) mode. Re-run without -i to confirm."
         exit 1
     fi
-    read -r -p "[?] Replace it with the new version? [y/N]: " replace_res
+    read -r -p "$(ui_ask "Replace it with the new version? [y/N]: ")" replace_res
     if [[ ! "${replace_res,,}" =~ ^(yes|y)$ ]]; then
-        echo "[-] Deployment aborted. $INSTALL_DIR was not modified."
+        ui_error "Deployment aborted. $(ui_path "$INSTALL_DIR") was not modified."
         exit 0
     fi
 fi
@@ -564,20 +609,20 @@ fi
 # 4.5 Make sure the command name doesn't belong to something dopt didn't install
 abort_name_clash() {
     if [ "$FORCE_INSTALL" = true ]; then
-        echo "[-] Error: Cannot ask for a different command name in forced (-i) mode." >&2
+        ui_error "Can't ask for a different command name in forced (-i) mode."
     fi
-    echo "[-] Deployment aborted. Re-run with -s <name> to use a different command name." >&2
+    ui_error "Deployment aborted. Re-run with -s <name> to use a different command name."
     exit 1
 }
 
 prompt_new_symlink_name() {
     local new_name
     while true; do
-        read -r -p "[?] Enter a different command name: " new_name
+        read -r -p "$(ui_ask "Enter a different command name: ")" new_name
         if [[ -z "$new_name" ]]; then
-            echo "[-] Name cannot be empty."
+            ui_error "Name cannot be empty."
         elif ! is_valid_name "$new_name"; then
-            echo "[-] Invalid name '$new_name' ($NAME_RULES)."
+            ui_error "Invalid name '$new_name' ($NAME_RULES)."
         else
             SYMLINK_NAME="$new_name"
             SYMLINK_RENAMED=true
@@ -601,11 +646,11 @@ while true; do
     # The link path itself is taken by something that isn't ours: never overwrite it
     if [[ -e "$BIN_LINK" || -L "$BIN_LINK" ]] &&
        { [[ ! -L "$BIN_LINK" ]] || ! path_is_inside "$(readlink -- "$BIN_LINK")" "$INSTALL_DIR"; }; then
-        echo -e "\n[!] $BIN_LINK already exists and wasn't installed by dopt for $APP_ID."
+        ui_warn "$(ui_path "$BIN_LINK") already exists and wasn't installed by dopt for $APP_ID."
         [ "$FORCE_INSTALL" = true ] && abort_name_clash
         echo "    1) Choose a different command name"
         echo "    2) Abort"
-        read -r -p "[?] Choose an action [1-2] (default 1): " clash_res
+        read -r -p "$(ui_ask "Choose an action [1-2] (default 1): ")" clash_res
         case "${clash_res:-1}" in
             1) prompt_new_symlink_name; continue ;;
             *) abort_name_clash ;;
@@ -620,17 +665,17 @@ while true; do
            path_is_inside "$EXISTING_BIN" "/opt/$BASE_APP_ID" ||
            path_is_inside "$EXISTING_BIN" "$USER_HOME/.local/opt/$BASE_APP_ID" ||
            path_is_inside "$EXISTING_BIN" "$USER_HOME/.local/opt/$BASE_APP_ID-local"; then
-            echo "[!] Warning: '$SYMLINK_NAME' also resolves to $EXISTING_BIN (another installation of this app). Whichever comes first in PATH will run."
+            ui_warn "'$SYMLINK_NAME' also exists at $(ui_path "$EXISTING_BIN") (another install of this app). Whichever comes first in PATH runs."
         else
-            echo -e "\n[!] The command '$SYMLINK_NAME' already exists at $EXISTING_BIN and wasn't installed by dopt."
+            ui_warn "The command '$SYMLINK_NAME' already exists at $(ui_path "$EXISTING_BIN") and wasn't installed by dopt."
             [ "$FORCE_INSTALL" = true ] && abort_name_clash
             echo "    1) Choose a different command name"
             echo "    2) Continue anyway (which '$SYMLINK_NAME' runs will depend on PATH order)"
             echo "    3) Abort"
-            read -r -p "[?] Choose an action [1-3] (default 1): " clash_res
+            read -r -p "$(ui_ask "Choose an action [1-3] (default 1): ")" clash_res
             case "${clash_res:-1}" in
                 1) prompt_new_symlink_name; continue ;;
-                2) echo "[!] Continuing: $BIN_LINK will coexist with $EXISTING_BIN." ;;
+                2) ui_warn "Continuing: $(ui_path "$BIN_LINK") will coexist with $(ui_path "$EXISTING_BIN")." ;;
                 *) abort_name_clash ;;
             esac
         fi
@@ -643,22 +688,21 @@ if [[ -n "$SYMLINK_CLI" || "$SYMLINK_RENAMED" = true ]]; then
     SYMLINK_HINT=" -s \"$SYMLINK_NAME\""
 fi
 if [[ "$SYMLINK_RENAMED" = true && -n "$MANIFEST" ]]; then
-    echo "[i] Tip: The manifest's 'symlink_as' doesn't match the name you chose. Update it, or pass -s \"$SYMLINK_NAME\" on future runs."
+    ui_detail "Tip: the manifest's 'symlink_as' doesn't match the name you chose. Update it, or pass -s \"$SYMLINK_NAME\" next time."
 fi
 
 # The desktop shortcut quotes the command path; refuse paths that would need shell escaping
 if [[ "$CLI_ONLY" != "true" ]] && ! desktop_exec_path "$BIN_LINK" >/dev/null; then
-    echo "[-] Error: The command path $BIN_LINK contains characters (\" \` \$ \\) that can't be used in a desktop shortcut." >&2
+    ui_error "The command path $BIN_LINK contains characters (\" \` \$ \\) that can't be used in a desktop shortcut."
     exit 1
 fi
 
 if [[ -d "$INSTALL_DIR" ]]; then
-    echo "[+] Map match: Found existing installation at $INSTALL_DIR"
+    ui_detail "Updating the existing install at $(ui_path "$INSTALL_DIR")"
 elif [ "$FORCE_INSTALL" = false ]; then
-    echo ""
-    read -r -p "[?] No version found. Perform a clean installation of $APP_NAME at $INSTALL_DIR? [Y/n]: " inst_res
+    read -r -p "$(ui_ask "Install $APP_NAME to $(ui_path "$INSTALL_DIR")? [Y/n]: ")" inst_res
     if [[ "${inst_res,,}" =~ ^(no|n) ]]; then
-        echo "[-] Deployment aborted."
+        ui_error "Deployment aborted."
         exit 0
     fi
 fi
@@ -705,7 +749,7 @@ print_resume_hint() {
     local sudo_prefix="" sha_hint=""
     [[ -n "$SHA256_EXPECTED" ]] && sha_hint=" --sha256 $SHA256_EXPECTED"
     [[ "$GLOBAL_INSTALL" = true ]] && sudo_prefix="sudo "
-    echo "[!] To apply this update later without re-downloading, run:"
+    ui_warn "To apply this update later without re-downloading, run:"
     if [[ -n "${MANIFEST:-}" && -f "${MANIFEST:-}" ]]; then
         echo "    ${sudo_prefix}./dopt.sh -m \"$MANIFEST\" -f \"$1\"${SYMLINK_HINT:-}${sha_hint}"
     else
@@ -718,13 +762,13 @@ cleanup_workspace() {
     # Roll back an interrupted swap and drop any half-built staging copy
     if [[ -d "$BACKUP_DIR" && ! -e "$INSTALL_DIR" ]]; then
         if mv -- "$BACKUP_DIR" "$INSTALL_DIR" 2>/dev/null; then
-            echo -e "\n[i] Update failed. The previous installation was restored at $INSTALL_DIR"
+            ui_warn "Update failed. The previous version was restored at $(ui_path "$INSTALL_DIR")"
         fi
     fi
     [[ -e "$STAGE_DIR" ]] && rm -rf -- "$STAGE_DIR"
     if [[ $exit_code -ne 0 && "$DOWNLOAD" = true && "$CLEANUP" = false ]]; then
         if saved=$(preserve_download); then
-            echo -e "\n[i] The downloaded update archive has been preserved at: $saved"
+            ui_detail "The downloaded archive was kept at $(ui_path "$saved")"
             print_resume_hint "$saved"
         fi
     fi
@@ -737,7 +781,7 @@ ARCH_RAW=$(uname -m)
 case "$ARCH_RAW" in
     x86_64)  ARCH_KEY="default_url_x64" ;;
     aarch64) ARCH_KEY="default_url_arm64" ;;
-    *) echo "[-] Error: Platform processor architecture ($ARCH_RAW) unsupported." >&2; exit 1 ;;
+    *) ui_error "Unsupported processor architecture: $ARCH_RAW"; exit 1 ;;
 esac
 
 if [ "$DOWNLOAD" = true ]; then
@@ -750,37 +794,43 @@ if [ "$DOWNLOAD" = true ]; then
     fi
     
     if [[ -z "$DOWNLOAD_URL" ]]; then
-        echo "[-] Error: No download URL provided. Use -u <url> if not using a manifest." >&2
+        ui_error "No download URL. Pass -u <url>, or add default_url_x64/default_url_arm64 to the manifest."
         exit 1
     fi
     
     TARBALL="$TMP_DIR/source_package.tar.gz"
-    echo "[*] Pulling network distribution payloads from endpoint..."
-    if ! curl -fL -o "$TARBALL" "$DOWNLOAD_URL"; then
+    ui_step "Downloading..."
+    # A single progress bar on a terminal; silent (errors only) in logs and pipes
+    if [[ -t 2 ]]; then
+        CURL_PROGRESS=(--progress-bar)
+    else
+        CURL_PROGRESS=(-sS)
+    fi
+    if ! curl -fL "${CURL_PROGRESS[@]}" -o "$TARBALL" "$DOWNLOAD_URL"; then
         rm -f -- "$TARBALL"
-        echo "[-] Error: Download gateway failed. Verify network routing or destination URL." >&2
+        ui_error "Download failed. Check the URL and your connection: $DOWNLOAD_URL"
         exit 1
     fi
 else
     TARBALL="$FILE_PATH"
 fi
 
+ui_step "Unpacking..."
 # Optional integrity check (--sha256), before anything is extracted
 if [[ -n "$SHA256_EXPECTED" ]]; then
     SHA256_ACTUAL=$(sha256sum -- "$TARBALL" | cut -d' ' -f1)
     if [[ "$SHA256_ACTUAL" != "$SHA256_EXPECTED" ]]; then
         # A mismatched download must never be kept or offered for resuming
         [ "$DOWNLOAD" = true ] && rm -f -- "$TARBALL"
-        echo "[-] Error: SHA-256 mismatch. The archive was not installed." >&2
-        echo "    Expected: $SHA256_EXPECTED" >&2
-        echo "    Actual:   $SHA256_ACTUAL" >&2
+        ui_error "SHA-256 mismatch. The archive was not installed."
+        echo "      Expected: $SHA256_EXPECTED" >&2
+        echo "      Actual:   $SHA256_ACTUAL" >&2
         exit 1
     fi
-    echo "[+] SHA-256 verified."
+    ui_detail "SHA-256 verified"
 fi
 
 # 6. Unpack and Parse Sandbox Interior
-echo "[*] Extracting execution code assets..."
 EXTRACT_DIR="$TMP_DIR/extract"
 mkdir -p "$EXTRACT_DIR"
 tar -xzf "$TARBALL" -C "$EXTRACT_DIR"
@@ -788,7 +838,7 @@ tar -xzf "$TARBALL" -C "$EXTRACT_DIR"
 # A single top-level folder is a wrapper (app-1.2/...): install its contents. Otherwise install everything.
 mapfile -t TOP_ENTRIES < <(find "$EXTRACT_DIR" -mindepth 1 -maxdepth 1)
 if [[ ${#TOP_ENTRIES[@]} -eq 0 ]]; then
-    echo "[-] Error: The archive is empty." >&2
+    ui_error "The archive is empty."
     exit 1
 elif [[ ${#TOP_ENTRIES[@]} -eq 1 && -d "${TOP_ENTRIES[0]}" && ! -L "${TOP_ENTRIES[0]}" ]]; then
     EXTRACTED_FOLDER="${TOP_ENTRIES[0]}"
@@ -798,9 +848,9 @@ fi
 
 # 7. Stage the new version next to the live one, so the swap is a pair of renames
 if [[ ! -w "$OPT_DIR" ]]; then
-    echo "[-] Error: Permission denied. You do not have write access to $OPT_DIR." >&2
+    ui_error "Permission denied: you can't write to $OPT_DIR."
     if [[ "$OPT_DIR" == "/opt" ]]; then
-        echo "[i] This is a system-wide installation. Try running dopt with sudo and the --global flag." >&2
+        echo "      This is a system-wide install. Run dopt with sudo and --global." >&2
     fi
     exit 1
 fi
@@ -813,7 +863,6 @@ if [[ -d "$BACKUP_DIR" && ! -e "$INSTALL_DIR" ]]; then
 fi
 rm -rf -- "$STAGE_DIR" "$BACKUP_DIR"
 
-echo "[*] Synchronizing updated frameworks into staging path..."
 mkdir -p "$STAGE_DIR"
 cp -R "$EXTRACTED_FOLDER"/. "$STAGE_DIR/"
 
@@ -830,13 +879,13 @@ staged_binary_ok() {
 
 if ! staged_binary_ok; then
     mapfile -t CANDIDATES < <(list_executables "$STAGE_DIR")
-    echo -e "\n[!] Couldn't find the binary '${BINARY_PATH:-$BINARY_PATTERN}' in the package."
+    ui_warn "Couldn't find the binary '${BINARY_PATH:-$BINARY_PATTERN}' in the archive."
     if [[ -z "$MANIFEST" && "$FORCE_INSTALL" = false && ${#CANDIDATES[@]} -gt 0 ]]; then
-        echo "    Executables found in the package:"
+        ui_detail "Executables found in the package:"
         for i in "${!CANDIDATES[@]}"; do
-            echo "    $((i + 1))) ${CANDIDATES[$i]}"
+            echo "        $((i + 1))) ${CANDIDATES[$i]}"
         done
-        read -r -p "[?] Pick the binary to link [1-${#CANDIDATES[@]}], or press Enter to abort: " pick_res
+        read -r -p "$(ui_ask "Pick the binary to link [1-${#CANDIDATES[@]}], or press Enter to abort: ")" pick_res
         if [[ "$pick_res" =~ ^[0-9]+$ ]] && (( pick_res >= 1 && pick_res <= ${#CANDIDATES[@]} )); then
             STAGED_BINARY="$STAGE_DIR/${CANDIDATES[$((pick_res - 1))]}"
         else
@@ -844,16 +893,16 @@ if ! staged_binary_ok; then
         fi
     elif [[ ${#CANDIDATES[@]} -gt 0 ]]; then
         if [[ -n "$MANIFEST" ]]; then
-            echo "    Executables found in the package (use one as 'binary_path' in the manifest):"
+            ui_detail "Executables found in the package (use one as 'binary_path' in the manifest):"
         else
-            echo "    Executables found in the package (enter one as the binary path):"
+            ui_detail "Executables found in the package (enter one as the binary path):"
         fi
-        printf '      %s\n' "${CANDIDATES[@]}"
+        printf '        %s\n' "${CANDIDATES[@]}"
     fi
 fi
 
 if ! staged_binary_ok; then
-    echo "[-] Critical Error: Execution file vector verification failed inside the new package. The existing installation was not touched." >&2
+    ui_error "Couldn't find the app's executable in the archive. Nothing was changed."
     exit 1
 fi
 BINARY_REL_PATH="${STAGED_BINARY#"$STAGE_DIR"/}"
@@ -887,24 +936,25 @@ terminate_app() {
     kill -KILL "$@" 2>/dev/null || true
 }
 
+ui_step "Installing..."
 mapfile -t APP_PIDS < <(find_app_pids)
 if [[ ${#APP_PIDS[@]} -gt 0 ]]; then
     if [ "$FORCE_INSTALL" = true ]; then
-        echo -e "\n[!] Warning: Forced installation active. Automatically terminating active processes for update..."
+        ui_detail "Stopping the running $APP_NAME (-i)..."
         terminate_app "${APP_PIDS[@]}"
         if [[ "$CLI_ONLY" != "true" ]]; then RESTART_REQD=true; fi
     else
-        echo -e "\n[!] Active Process Block: $APP_NAME is currently running."
-        read -r -p "[?] Kill process to deploy update? [Y/n]: " run_res
+        ui_warn "$APP_NAME is running."
+        read -r -p "$(ui_ask "Stop it to install the update? [Y/n]: ")" run_res
         if [[ ! "${run_res,,}" =~ ^(no|n) ]]; then
             terminate_app "${APP_PIDS[@]}"
             if [[ "$CLI_ONLY" != "true" ]]; then RESTART_REQD=true; fi
         else
-            echo "[-] Update cycle canceled to keep app active."
+            ui_warn "Update canceled to keep $APP_NAME running."
             RESUME_FILE=""
             if [ "$DOWNLOAD" = true ]; then
                 if [ "$CLEANUP" = false ] && RESUME_FILE=$(preserve_download); then
-                    echo "[i] The downloaded update archive has been preserved at: $RESUME_FILE"
+                    ui_detail "The downloaded archive was kept at $(ui_path "$RESUME_FILE")"
                 fi
             else
                 RESUME_FILE="$TARBALL"
@@ -921,7 +971,6 @@ fi
 
 # Swap: live -> backup, staged -> live, then drop the backup. The exit trap restores the backup on failure.
 assert_managed_dir "$INSTALL_DIR"
-echo "[*] Swapping in the new version to clear stale libraries..."
 if [[ -e "$INSTALL_DIR" ]]; then
     mv -- "$INSTALL_DIR" "$BACKUP_DIR"
 fi
@@ -937,7 +986,7 @@ REAL_BINARY="$INSTALL_DIR/$BINARY_REL_PATH"
 if [[ -n "${DEF_SYMLINK_NAME:-}" && "$DEF_SYMLINK_NAME" != "$SYMLINK_NAME" ]]; then
     OLD_BIN_LINK="$BIN_LINK_DIR/$DEF_SYMLINK_NAME"
     if [[ -L "$OLD_BIN_LINK" ]] && path_is_inside "$(readlink -- "$OLD_BIN_LINK")" "$INSTALL_DIR"; then
-        echo "[*] Cleaning up legacy symlink at $OLD_BIN_LINK..."
+        ui_detail "Removed the old command link '$DEF_SYMLINK_NAME'"
         rm -f -- "$OLD_BIN_LINK"
     fi
 fi
@@ -947,7 +996,7 @@ ln -sfn "$REAL_BINARY" "$BIN_LINK"
 
 # 8. Dynamic Linux Desktop Icon Integration Layout
 if [[ "$CLI_ONLY" != "true" ]]; then
-    echo "[*] Scanning workspace assets for Application Desktop Graphics..."
+    ui_step "Creating menu shortcut..."
     ICON_PATH=""
     
     if [[ -n "${ICON_PATH_MANIFEST:-}" ]]; then
@@ -975,8 +1024,6 @@ if [[ "$CLI_ONLY" != "true" ]]; then
         ICON_PATH=$(find "$INSTALL_DIR" -maxdepth 5 -type d \( "${FIND_PRUNE_ARGS[@]}" \) -prune -o -type f \( -name "*.png" -o -name "*.svg" \) -print | head -n 1 || true)
     fi
 
-    echo "[*] Injecting desktop menu shell reference configuration at $DESKTOP_FILE..."
-
     DESKTOP_EXEC=$(desktop_exec_path "$BIN_LINK")
     DESKTOP_FLAGS=$(desktop_text "${EXEC_FLAGS:-}")
     DESKTOP_COMMENT=$(desktop_text "${APP_COMMENT:-}")
@@ -996,37 +1043,36 @@ if [[ "$CLI_ONLY" != "true" ]]; then
     if command -v desktop-file-validate >/dev/null 2>&1; then
         VALIDATE_OUT=$(desktop-file-validate "$DESKTOP_FILE" 2>&1 || true)
         if [[ -n "$VALIDATE_OUT" ]]; then
-            echo "[!] desktop-file-validate reported:"
-            sed 's/^/    /' <<< "$VALIDATE_OUT"
+            ui_warn "desktop-file-validate reported:"
+            sed 's/^/      /' <<< "$VALIDATE_OUT"
         fi
     fi
-    echo "[+] Native Desktop integration verified."
 else
-    echo "[*] App designated as CLI-only. Bypassing desktop shortcut layer."
     if [[ -f "$DESKTOP_FILE" ]]; then
-        echo "[*] Removing previous desktop shortcut at $DESKTOP_FILE..."
+        ui_detail "Removed the old menu shortcut (the app is CLI-only now)"
         rm -f -- "$DESKTOP_FILE"
     fi
 fi
 
 # 9. Post-Execution cleanup hooks
+ARCHIVE_NOTE=""
 if [ "$DOWNLOAD" = true ]; then
     if [ "$CLEANUP" = true ]; then
-        echo "[*] Removing compressed remote runtime package artifacts..."
+        ARCHIVE_NOTE="not kept (-c)"
     elif KEPT_FILE=$(preserve_download); then
-        echo "[i] Local installation backup kept at: $KEPT_FILE"
+        ARCHIVE_NOTE="kept at $(ui_path "$KEPT_FILE")"
     fi
 elif [ "$CLEANUP" = true ] && [[ -f "$TARBALL" ]]; then
     # Local archive (-f, typed or picked): ask before deleting the user's file, unless -i
     del_res="y"
     if [ "$FORCE_INSTALL" = false ]; then
-        read -r -p "[?] Delete the installer archive $TARBALL? [Y/n]: " del_res
+        read -r -p "$(ui_ask "Delete the archive $(ui_path "$TARBALL")? [Y/n]: ")" del_res
     fi
     if [[ ! "${del_res,,}" =~ ^(no|n) ]]; then
         rm -f -- "$TARBALL"
-        echo "[*] Removed installer archive: $TARBALL"
+        ARCHIVE_NOTE="deleted ($(ui_path "$TARBALL"))"
     else
-        echo "[i] Kept installer archive: $TARBALL"
+        ARCHIVE_NOTE="kept at $(ui_path "$TARBALL")"
     fi
 fi
 
@@ -1041,22 +1087,38 @@ launch_app() {
     fi
 }
 
+# Summary of where everything went
+echo ""
+if [ "$WAS_INSTALLED" = true ]; then
+    ui_ok "$APP_NAME updated"
+else
+    ui_ok "$APP_NAME installed"
+fi
+ui_line "Location   $(ui_path "$INSTALL_DIR")  ($(du -sh -- "$INSTALL_DIR" 2>/dev/null | cut -f1))"
+if [ "$GLOBAL_INSTALL" = false ] && [[ ":${PATH}:" != *":$BIN_LINK_DIR:"* ]]; then
+    ui_line "Command    $SYMLINK_NAME  (note: $(ui_path "$BIN_LINK_DIR") isn't on your PATH)"
+else
+    ui_line "Command    $SYMLINK_NAME"
+fi
+if [[ "$CLI_ONLY" != "true" ]]; then
+    ui_line "Shortcut   $APP_NAME"
+else
+    ui_line "Shortcut   none (CLI-only)"
+fi
+[[ -n "$ARCHIVE_NOTE" ]] && ui_line "Archive    $ARCHIVE_NOTE"
+
 if [[ "$CLI_ONLY" != "true" ]]; then
     if [ "$FORCE_INSTALL" = true ]; then
         if [ "$RESTART_REQD" = true ]; then
-            echo "[*] Auto-relaunching application window environment..."
             launch_app
-            echo "[+] Application successfully brought back online."
+            ui_ok "Relaunched $APP_NAME"
         fi
     else
         echo ""
-        read -r -p "[?] Deployment complete. Would you like to launch $APP_NAME now? [Y/n]: " launch_ans
+        read -r -p "$(ui_ask "Launch $APP_NAME now? [Y/n]: ")" launch_ans
         if [[ ! "${launch_ans,,}" =~ ^(no|n) ]]; then
-            echo "[*] Launching application..."
             launch_app
-            echo "[+] Application successfully launched."
+            ui_ok "Launched $APP_NAME"
         fi
     fi
 fi
-
-echo -e "\n[+] Success! $APP_NAME has been deployed via dopt."

@@ -239,6 +239,8 @@ if command -v python3 >/dev/null 2>&1; then
 
     run 'n\n' -m "$WORK/m.json" -u "$URL/app.tar.gz?token=abc#frag"
     check "download installs" version_is v1
+    check "downloads add a Downloading step" out_has "[2/5] Downloading..."
+    check "piped download shows no transfer table" out_lacks "% Total"
     check "query string stripped from saved name" test -f "$CWD/app.tar.gz"
 
     run 'n\n' -m "$WORK/m.json" -u "$URL/app.tar.gz"
@@ -333,6 +335,29 @@ check "elevating keeps all original options" out_has "-g -m $WORK/m.json -f $WOR
 run '2\ny\ny\nn\n' -m "$WORK/m.json" -f "$WORK/v1.tar.gz" -s dselftest-local
 check "isolated local install gets the (Local) name" grep -qx 'Name=Dopt Selftest (Local)' "$APPS/$APP-local.desktop"
 rm -rf -- "$DOPT_TEST_ROOT/global-opt"
+
+# ---------- output ----------
+section "Output"
+run 'n\n' -m "$WORK/m.json" -f "$WORK/v1.tar.gz"
+check "piped output has no color codes" bash -c "! grep -q $'\e' '$WORK/out'"
+check "steps are numbered" out_has "[1/4] Checking Dopt Selftest..."
+check "last step is the menu shortcut" out_has "[4/4] Creating menu shortcut..."
+check "summary says updated" out_has "[+] Dopt Selftest updated"
+check "summary shows the location" out_has "Location   $INST"
+check "summary shows the command" out_has "Command    dselftest"
+run '' -m "$WORK/m-cli.json" -f "$WORK/v1.tar.gz" -s dselftest -i
+check "CLI-only install has 3 steps" out_has "[3/3] Installing..."
+check "CLI-only summary has no shortcut" out_has "Shortcut   none (CLI-only)"
+
+if command -v python3 >/dev/null 2>&1; then
+    PTY='import pty, sys; sys.exit(pty.spawn(sys.argv[1:]) >> 8)'
+    (cd "$CWD" && python3 -c "$PTY" "$DOPT" -m "$WORK/m-cli.json" -f "$WORK/v1.tar.gz" -s dselftest -i) < /dev/null > "$WORK/out" 2>&1
+    check "terminal output is colored" grep -q $'\e\[' "$WORK/out"
+    (cd "$CWD" && NO_COLOR=1 python3 -c "$PTY" "$DOPT" -m "$WORK/m-cli.json" -f "$WORK/v1.tar.gz" -s dselftest -i) < /dev/null > "$WORK/out" 2>&1
+    check "NO_COLOR disables color on a terminal" bash -c "! grep -q $'\e' '$WORK/out'"
+else
+    skip "terminal color tests (python3 not installed)"
+fi
 
 # ---------- static checks ----------
 section "Static checks"

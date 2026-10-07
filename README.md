@@ -82,6 +82,10 @@ If no manifest is provided, `dopt` will launch an **Interactive Wizard** to guid
 - `-v, --version`: Show the `dopt` version.
 - `-h, --help`: Show the help menu.
 
+### Output
+
+`dopt` shows numbered steps (`[2/5] Downloading...`) and finishes with a summary of where everything went: install location, command, menu shortcut and what happened to the archive. Markers keep their meaning without color: `[+]` success, `[!]` warning, `[-]` error, `[?]` a question for you. Color is used only when the output is a terminal. Set `NO_COLOR=1` to turn it off entirely.
+
 ### Updating Applications
 
 Updating an application is the same command as installing it. The golden rule is: **Same App ID = Update**.
