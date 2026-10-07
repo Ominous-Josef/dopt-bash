@@ -36,7 +36,7 @@ show_help() {
     echo ""
     echo "Modifiers:"
     echo "  -g, --global            Install system-wide to /opt (requires sudo)"
-    echo "  -c, --cleanup           Delete downloaded installer archive after a successful setup"
+    echo "  -c, --cleanup           Delete the downloaded or local archive after a successful setup"
     echo "  -i, --install           Skip confirmation prompts; auto-terminate and relaunch a running app"
     echo "  -h, --help              Show this help menu"
     echo ""
@@ -82,6 +82,38 @@ package_owner() {
         [[ -n "$OWNER_PKG" ]] && { OWNER_TOOL="apt"; return 0; }
     fi
     return 1
+}
+
+# Replace control characters (newlines, tabs, ...) with single spaces
+single_line() {
+    printf '%s' "$1" | tr '\000-\037\177' ' ' | tr -s ' '
+}
+
+# Desktop Entry string value: single line (no injected keys), backslashes escaped
+desktop_text() {
+    local v
+    v=$(single_line "$1")
+    printf '%s' "${v//\\/\\\\}"
+}
+
+# Desktop Entry Exec program path: always quoted, '%' escaped; refuses characters that need shell escaping
+desktop_exec_path() {
+    case "$1" in
+        *'"'*|*'`'*|*'$'*|*'\'*) return 1 ;;
+    esac
+    printf '"%s"' "${1//%/%%}"
+}
+
+# Shallowest file under $1 (max depth 3) whose name matches pattern $2
+find_binary_by_name() {
+    find "$1" -maxdepth 3 -type f -iname "$2" -printf '%d\t%p\n' 2>/dev/null | sort -n | head -n 1 | cut -f2- || true
+}
+
+# Executable candidates under $1 (relative paths, shallowest first) for the binary picker
+list_executables() {
+    find "$1" -maxdepth 3 -type f -executable ! -name '*.so' ! -name '*.so.*' \
+        ! -name 'chrome-sandbox' ! -name 'crashpad_handler' ! -name 'chrome_crashpad_handler' \
+        -printf '%d\t%P\n' 2>/dev/null | sort -n | cut -f2- | head -n 10 || true
 }
 
 # 1. Parse command-line inputs
@@ -290,7 +322,9 @@ if [[ -d "$OPT_DIR/$APP_ID" ]]; then
     EXISTING_LINK=$(find "$BIN_LINK_DIR" -maxdepth 1 -type l -lname "$OPT_DIR/$APP_ID/*" 2>/dev/null | head -n 1 || true)
     if [[ -n "$EXISTING_LINK" ]]; then
         DEF_SYMLINK_NAME=$(basename "$EXISTING_LINK")
-        DEF_BINARY_PATTERN=$(basename "$(readlink -- "$EXISTING_LINK")")
+        # Path relative to the install dir (e.g. bin/app), so nested binaries are found again
+        OLD_TARGET=$(readlink -- "$EXISTING_LINK")
+        DEF_BINARY_PATTERN="${OLD_TARGET#"$OPT_DIR/$APP_ID/"}"
     fi
 
     if [[ -f "$DESKTOP_FILE" ]]; then
@@ -348,9 +382,13 @@ else
     
     APP_COMMENT=""
 
-    read -r -p "[?] Enter target binary name to link [${DEF_BINARY_PATTERN:-$SYMLINK_NAME}]: " BINARY_PATTERN
+    read -r -p "[?] Enter target binary name or relative path (e.g. bin/app) [${DEF_BINARY_PATTERN:-$SYMLINK_NAME}]: " BINARY_PATTERN
     BINARY_PATTERN=${BINARY_PATTERN:-${DEF_BINARY_PATTERN:-$SYMLINK_NAME}}
     BINARY_PATH=""
+    if [[ "$BINARY_PATTERN" == */* ]]; then
+        BINARY_PATH="$BINARY_PATTERN"
+        BINARY_PATTERN=""
+    fi
     
     icon_prompt_def="(leave blank to auto-detect)"
     [[ -n "$DEF_ICON_MANIFEST" ]] && icon_prompt_def="[$DEF_ICON_MANIFEST]"
@@ -365,6 +403,9 @@ else
 fi
 
 validate_name "symlink name" "$SYMLINK_NAME"
+
+APP_NAME=$(single_line "$APP_NAME")
+APP_COMMENT=$(single_line "${APP_COMMENT:-}")
 
 if [[ "$APPEND_LOCAL_NAME" = true && "$APP_NAME" != *" (Local)" ]]; then
     APP_NAME="$APP_NAME (Local)"
@@ -514,6 +555,12 @@ if [[ "$SYMLINK_RENAMED" = true && -n "$MANIFEST" ]]; then
     echo "[i] Tip: The manifest's 'symlink_as' doesn't match the name you chose. Update it, or pass -s \"$SYMLINK_NAME\" on future runs."
 fi
 
+# The desktop shortcut quotes the command path; refuse paths that would need shell escaping
+if [[ "$CLI_ONLY" != "true" ]] && ! desktop_exec_path "$BIN_LINK" >/dev/null; then
+    echo "[-] Error: The command path $BIN_LINK contains characters (\" \` \$ \\) that can't be used in a desktop shortcut." >&2
+    exit 1
+fi
+
 if [[ -d "$INSTALL_DIR" ]]; then
     echo "[+] Map match: Found existing installation at $INSTALL_DIR"
 elif [ "$FORCE_INSTALL" = false ]; then
@@ -527,8 +574,55 @@ fi
 
 # 5. Target Architecture Resolution and Source Acquisition
 TMP_DIR=$(mktemp -d -t dopt-workspace-XXXXXXXX)
+# Move the downloaded archive into the current directory without overwriting anything.
+# Prints the saved path; fails (saving nothing) if the archive isn't a readable tarball.
+preserve_download() {
+    local name stem ext dest n safe_name='^[A-Za-z0-9._ +-]+$'
+    [[ -f "${TARBALL:-}" ]] && tar -tzf "$TARBALL" >/dev/null 2>&1 || return 1
+
+    name="${DOWNLOAD_URL:-}"; name="${name%%[?#]*}"
+    name=$(basename -- "$name")
+    name="${name//%20/ }"
+    if [[ -z "$name" || "$name" == download* || "$name" == .* || ! "$name" =~ $safe_name ||
+          ( "$name" != *.tar.gz && "$name" != *.tgz ) ]]; then
+        name="${APP_ID}-linux.tar.gz"
+    fi
+
+    if [[ "$name" == *.tar.gz ]]; then
+        stem="${name%.tar.gz}"; ext=".tar.gz"
+    else
+        stem="${name%.tgz}"; ext=".tgz"
+    fi
+    # Reuse an identical copy (name, name-1, name-2, ...); otherwise take the first free name
+    dest="$(pwd)/$name"
+    n=0
+    while [[ -e "$dest" ]]; do
+        if cmp -s -- "$TARBALL" "$dest"; then
+            echo "$dest"
+            return 0
+        fi
+        n=$((n + 1))
+        dest="$(pwd)/${stem}-${n}${ext}"
+    done
+
+    mv -- "$TARBALL" "$dest" || return 1
+    if [[ -n "${SUDO_USER:-}" ]]; then chown -- "${SUDO_USER}:" "$dest" 2>/dev/null || true; fi
+    echo "$dest"
+}
+
+print_resume_hint() {
+    local sudo_prefix=""
+    [[ "$GLOBAL_INSTALL" = true ]] && sudo_prefix="sudo "
+    echo "[!] To apply this update later without re-downloading, run:"
+    if [[ -n "${MANIFEST:-}" && -f "${MANIFEST:-}" ]]; then
+        echo "    ${sudo_prefix}./dopt.sh -m \"$MANIFEST\" -f \"$1\"${SYMLINK_HINT:-}"
+    else
+        echo "    ${sudo_prefix}./dopt.sh -a \"$APP_ID\" -f \"$1\"${SYMLINK_HINT:-}"
+    fi
+}
+
 cleanup_workspace() {
-    local exit_code=$?
+    local exit_code=$? saved
     # Roll back an interrupted swap and drop any half-built staging copy
     if [[ -d "$BACKUP_DIR" && ! -e "$INSTALL_DIR" ]]; then
         if mv -- "$BACKUP_DIR" "$INSTALL_DIR" 2>/dev/null; then
@@ -536,20 +630,10 @@ cleanup_workspace() {
         fi
     fi
     [[ -e "$STAGE_DIR" ]] && rm -rf -- "$STAGE_DIR"
-    if [[ $exit_code -ne 0 && "$DOWNLOAD" = true && -f "${TARBALL:-}" && "$CLEANUP" = false ]]; then
-        URL_FILE_NAME=$(basename "${DOWNLOAD_URL:-}" | sed 's/%20/ /g')
-        [[ "$URL_FILE_NAME" == "download"* || -z "$URL_FILE_NAME" ]] && URL_FILE_NAME="${APP_ID}-linux.tar.gz"
-        OUTPUT_DEST="$(pwd)/$URL_FILE_NAME"
-        if mv -f -- "$TARBALL" "$OUTPUT_DEST" 2>/dev/null; then
-            [[ -n "${SUDO_USER:-}" ]] && chown -- "${SUDO_USER}:" "$OUTPUT_DEST" 2>/dev/null
-            echo -e "\n[i] The downloaded update archive has been preserved at: $OUTPUT_DEST"
-            echo "[!] To apply this update later without re-downloading, run:"
-            [[ "$GLOBAL_INSTALL" = true ]] && SUDO_PREFIX="sudo " || SUDO_PREFIX=""
-            if [[ -n "${MANIFEST:-}" && -f "${MANIFEST:-}" ]]; then
-                echo "    ${SUDO_PREFIX}./dopt.sh -m \"$MANIFEST\" -f \"$OUTPUT_DEST\"${SYMLINK_HINT:-}"
-            else
-                echo "    ${SUDO_PREFIX}./dopt.sh -a \"$APP_ID\" -f \"$OUTPUT_DEST\"${SYMLINK_HINT:-}"
-            fi
+    if [[ $exit_code -ne 0 && "$DOWNLOAD" = true && "$CLEANUP" = false ]]; then
+        if saved=$(preserve_download); then
+            echo -e "\n[i] The downloaded update archive has been preserved at: $saved"
+            print_resume_hint "$saved"
         fi
     fi
     rm -rf "$TMP_DIR"
@@ -581,6 +665,7 @@ if [ "$DOWNLOAD" = true ]; then
     TARBALL="$TMP_DIR/source_package.tar.gz"
     echo "[*] Pulling network distribution payloads from endpoint..."
     if ! curl -fL -o "$TARBALL" "$DOWNLOAD_URL"; then
+        rm -f -- "$TARBALL"
         echo "[-] Error: Download gateway failed. Verify network routing or destination URL." >&2
         exit 1
     fi
@@ -595,11 +680,20 @@ fi
 
 # 6. Unpack and Parse Sandbox Interior
 echo "[*] Extracting execution code assets..."
-tar -xzf "$TARBALL" -C "$TMP_DIR"
+EXTRACT_DIR="$TMP_DIR/extract"
+mkdir -p "$EXTRACT_DIR"
+tar -xzf "$TARBALL" -C "$EXTRACT_DIR"
 
-EXTRACTED_FOLDER=$(find "$TMP_DIR" -mindepth 1 -maxdepth 2 -type d -iname "*${APP_ID}*" | head -n 1)
-[[ -z "$EXTRACTED_FOLDER" ]] && EXTRACTED_FOLDER=$(find "$TMP_DIR" -mindepth 1 -maxdepth 1 -type d | head -n 1)
-[[ -z "$EXTRACTED_FOLDER" ]] && EXTRACTED_FOLDER="$TMP_DIR"
+# A single top-level folder is a wrapper (app-1.2/...): install its contents. Otherwise install everything.
+mapfile -t TOP_ENTRIES < <(find "$EXTRACT_DIR" -mindepth 1 -maxdepth 1)
+if [[ ${#TOP_ENTRIES[@]} -eq 0 ]]; then
+    echo "[-] Error: The archive is empty." >&2
+    exit 1
+elif [[ ${#TOP_ENTRIES[@]} -eq 1 && -d "${TOP_ENTRIES[0]}" && ! -L "${TOP_ENTRIES[0]}" ]]; then
+    EXTRACTED_FOLDER="${TOP_ENTRIES[0]}"
+else
+    EXTRACTED_FOLDER="$EXTRACT_DIR"
+fi
 
 # 7. Stage the new version next to the live one, so the swap is a pair of renames
 if [[ ! -w "$OPT_DIR" ]]; then
@@ -625,11 +719,39 @@ cp -R "$EXTRACTED_FOLDER"/. "$STAGE_DIR/"
 if [[ -n "$BINARY_PATH" ]]; then
     STAGED_BINARY="$STAGE_DIR/$BINARY_PATH"
 else
-    STAGED_BINARY=$(find "$STAGE_DIR" -maxdepth 1 -type f -iname "$BINARY_PATTERN" | head -n 1)
+    STAGED_BINARY=$(find_binary_by_name "$STAGE_DIR" "$BINARY_PATTERN")
     [[ -z "$STAGED_BINARY" ]] && STAGED_BINARY=$(find "$STAGE_DIR" -maxdepth 1 -type f -executable ! -name "chrome-sandbox" ! -name "crashpad_handler" | head -n 1)
 fi
 
-if [[ -z "$STAGED_BINARY" || ! -f "$STAGED_BINARY" ]] || ! path_is_inside "$STAGED_BINARY" "$STAGE_DIR"; then
+staged_binary_ok() {
+    [[ -n "$STAGED_BINARY" && -f "$STAGED_BINARY" ]] && path_is_inside "$STAGED_BINARY" "$STAGE_DIR"
+}
+
+if ! staged_binary_ok; then
+    mapfile -t CANDIDATES < <(list_executables "$STAGE_DIR")
+    echo -e "\n[!] Couldn't find the binary '${BINARY_PATH:-$BINARY_PATTERN}' in the package."
+    if [[ -z "$MANIFEST" && "$FORCE_INSTALL" = false && ${#CANDIDATES[@]} -gt 0 ]]; then
+        echo "    Executables found in the package:"
+        for i in "${!CANDIDATES[@]}"; do
+            echo "    $((i + 1))) ${CANDIDATES[$i]}"
+        done
+        read -r -p "[?] Pick the binary to link [1-${#CANDIDATES[@]}], or press Enter to abort: " pick_res
+        if [[ "$pick_res" =~ ^[0-9]+$ ]] && (( pick_res >= 1 && pick_res <= ${#CANDIDATES[@]} )); then
+            STAGED_BINARY="$STAGE_DIR/${CANDIDATES[$((pick_res - 1))]}"
+        else
+            STAGED_BINARY=""
+        fi
+    elif [[ ${#CANDIDATES[@]} -gt 0 ]]; then
+        if [[ -n "$MANIFEST" ]]; then
+            echo "    Executables found in the package (use one as 'binary_path' in the manifest):"
+        else
+            echo "    Executables found in the package (enter one as the binary path):"
+        fi
+        printf '      %s\n' "${CANDIDATES[@]}"
+    fi
+fi
+
+if ! staged_binary_ok; then
     echo "[-] Critical Error: Execution file vector verification failed inside the new package. The existing installation was not touched." >&2
     exit 1
 fi
@@ -680,28 +802,16 @@ if [[ ${#APP_PIDS[@]} -gt 0 ]]; then
             echo "[-] Update cycle canceled to keep app active."
             RESUME_FILE=""
             if [ "$DOWNLOAD" = true ]; then
-                if [ "$CLEANUP" = false ]; then
-                    URL_FILE_NAME=$(basename "$DOWNLOAD_URL" | sed 's/%20/ /g')
-                    [[ "$URL_FILE_NAME" == "download"* || -z "$URL_FILE_NAME" ]] && URL_FILE_NAME="${APP_ID}-linux.tar.gz"
-                    OUTPUT_DEST="$(pwd)/$URL_FILE_NAME"
-                    mv -f -- "$TARBALL" "$OUTPUT_DEST"
-                    [[ -n "${SUDO_USER:-}" ]] && chown -- "${SUDO_USER}:" "$OUTPUT_DEST"
-                    echo "[i] The downloaded update archive has been preserved at: $OUTPUT_DEST"
-                    RESUME_FILE="$OUTPUT_DEST"
+                if [ "$CLEANUP" = false ] && RESUME_FILE=$(preserve_download); then
+                    echo "[i] The downloaded update archive has been preserved at: $RESUME_FILE"
                 fi
-            elif [[ -n "${FILE_PATH:-}" ]]; then
-                RESUME_FILE="$FILE_PATH"
-            elif [[ -n "${TARBALL:-}" ]]; then
+            else
                 RESUME_FILE="$TARBALL"
             fi
 
             if [[ -n "$RESUME_FILE" ]]; then
-                echo -e "\n[!] To apply this update later without re-downloading, run:"
-                if [[ -n "$MANIFEST" && -f "$MANIFEST" ]]; then
-                    echo "    sudo ./dopt.sh -m \"$MANIFEST\" -f \"$RESUME_FILE\"$SYMLINK_HINT"
-                else
-                    echo "    sudo ./dopt.sh -a \"$APP_ID\" -f \"$RESUME_FILE\"$SYMLINK_HINT"
-                fi
+                echo ""
+                print_resume_hint "$RESUME_FILE"
             fi
             exit 0
         fi
@@ -766,18 +876,29 @@ if [[ "$CLI_ONLY" != "true" ]]; then
 
     echo "[*] Injecting desktop menu shell reference configuration at $DESKTOP_FILE..."
 
-    cat << EOF > "$DESKTOP_FILE"
-[Desktop Entry]
-Version=1.0
-Type=Application
-Name=${APP_NAME}
-Comment=${APP_COMMENT}
-Exec=${BIN_LINK}${EXEC_FLAGS:+ $EXEC_FLAGS}
-Icon=${ICON_PATH:-system-run}
-Terminal=false
-Categories=${APP_CATEGORIES:-Utility;}
-StartupWMClass=$(basename "$REAL_BINARY")
-EOF
+    DESKTOP_EXEC=$(desktop_exec_path "$BIN_LINK")
+    DESKTOP_FLAGS=$(desktop_text "${EXEC_FLAGS:-}")
+    DESKTOP_COMMENT=$(desktop_text "${APP_COMMENT:-}")
+    {
+        echo "[Desktop Entry]"
+        echo "Version=1.0"
+        echo "Type=Application"
+        echo "Name=$(desktop_text "$APP_NAME")"
+        [[ -n "$DESKTOP_COMMENT" ]] && echo "Comment=$DESKTOP_COMMENT"
+        echo "Exec=${DESKTOP_EXEC}${DESKTOP_FLAGS:+ $DESKTOP_FLAGS}"
+        echo "Icon=$(desktop_text "${ICON_PATH:-system-run}")"
+        echo "Terminal=false"
+        echo "Categories=$(desktop_text "${APP_CATEGORIES:-Utility;}")"
+        echo "StartupWMClass=$(desktop_text "$(basename "$REAL_BINARY")")"
+    } > "$DESKTOP_FILE"
+
+    if command -v desktop-file-validate >/dev/null 2>&1; then
+        VALIDATE_OUT=$(desktop-file-validate "$DESKTOP_FILE" 2>&1 || true)
+        if [[ -n "$VALIDATE_OUT" ]]; then
+            echo "[!] desktop-file-validate reported:"
+            sed 's/^/    /' <<< "$VALIDATE_OUT"
+        fi
+    fi
     echo "[+] Native Desktop integration verified."
 else
     echo "[*] App designated as CLI-only. Bypassing desktop shortcut layer."
@@ -791,13 +912,20 @@ fi
 if [ "$DOWNLOAD" = true ]; then
     if [ "$CLEANUP" = true ]; then
         echo "[*] Removing compressed remote runtime package artifacts..."
+    elif KEPT_FILE=$(preserve_download); then
+        echo "[i] Local installation backup kept at: $KEPT_FILE"
+    fi
+elif [ "$CLEANUP" = true ] && [[ -f "$TARBALL" ]]; then
+    # Local archive (-f or scanned): ask before deleting the user's file, unless -i
+    del_res="y"
+    if [ "$FORCE_INSTALL" = false ]; then
+        read -r -p "[?] Delete the installer archive $TARBALL? [Y/n]: " del_res
+    fi
+    if [[ ! "${del_res,,}" =~ ^(no|n) ]]; then
+        rm -f -- "$TARBALL"
+        echo "[*] Removed installer archive: $TARBALL"
     else
-        URL_FILE_NAME=$(basename "$DOWNLOAD_URL" | sed 's/%20/ /g')
-        [[ "$URL_FILE_NAME" == "download"* || -z "$URL_FILE_NAME" ]] && URL_FILE_NAME="${APP_ID}-linux.tar.gz"
-        OUTPUT_DEST="$(pwd)/$URL_FILE_NAME"
-        mv -f -- "$TARBALL" "$OUTPUT_DEST"
-        [[ -n "${SUDO_USER:-}" ]] && chown -- "${SUDO_USER}:" "$OUTPUT_DEST"
-        echo "[i] Local installation backup kept at: $OUTPUT_DEST"
+        echo "[i] Kept installer archive: $TARBALL"
     fi
 fi
 

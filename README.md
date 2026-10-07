@@ -72,7 +72,7 @@ If no manifest is provided, `dopt` will launch an **Interactive Wizard** to guid
 
 **Modifiers:**
 - `-g, --global`: Install the application system-wide to `/opt` (requires `sudo`).
-- `-c, --cleanup`: Delete the downloaded tarball after a successful setup.
+- `-c, --cleanup`: After a successful setup, delete the archive: a download is simply not kept, and a local archive (`-f` or scanned) is deleted after a confirmation prompt (no prompt with `-i`).
 - `-i, --install`: Skip confirmation prompts. If the app is running, it is terminated automatically and relaunched after the update.
 - `-h, --help`: Show the help menu.
 
@@ -143,8 +143,8 @@ The manifest is a JSON file that defines the application parameters. See `exampl
 | `app_id` | String | **Required.** A unique identifier (e.g., `com.myorg.app`). Used as the install folder name and for desktop entries. Letters, digits, `.`, `_` and `-` only. |
 | `name` | String | *(Optional)* The human-readable name of the application. Defaults to `app_id`. |
 | `comment` | String | *(Optional)* A short description used in the `.desktop` file. |
-| `binary_pattern` | String | The filename pattern of the executable at the top level of the archive. `dopt` will search for this to symlink. Required unless `binary_path` is set. |
-| `binary_path` | String | The exact relative path to the binary within the archive. Overrides `binary_pattern`. Required unless `binary_pattern` is set. |
+| `binary_pattern` | String | The filename pattern of the executable. `dopt` searches up to 3 levels deep (shallowest match wins) for this to symlink. Required unless `binary_path` is set. |
+| `binary_path` | String | The exact relative path to the binary inside the app folder (if the archive has a single top-level folder, paths are relative to it). Overrides `binary_pattern`. Required unless `binary_pattern` is set. |
 | `icon_path` | String | *(Optional)* The exact relative path or filename of the icon to use for the `.desktop` file. |
 | `cli_only` | Boolean/String | *(Optional)* Set to `true` if the application has no GUI. Prevents `.desktop` file creation. |
 | `symlink_as` | String | *(Optional)* The name of the command symlink created in `~/.local/bin` or `/usr/local/bin` (e.g., `myapp`). Defaults to `app_id`. Can be overridden with `-s`. |
