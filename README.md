@@ -72,14 +72,16 @@ If no manifest is provided, `dopt` will launch an **Interactive Wizard** to guid
 **Modifiers:**
 - `-g, --global`: Install the application system-wide to `/opt` (requires `sudo`).
 - `-c, --cleanup`: Delete the downloaded tarball after a successful setup.
-- `-i, --install`: Force a fresh installation, bypassing user prompts if no existing version is found.
+- `-i, --install`: Skip confirmation prompts. If the app is running, it is terminated automatically and relaunched after the update.
 - `-h, --help`: Show the help menu.
 
 ### Updating Applications
 
 Because `dopt` does not maintain a complex internal database, updating an application is functionally identical to installing it. The golden rule is: **Same App ID = Overwrite / Update**.
 
-When you run `dopt` with a new `.tar.gz` payload, as long as the `app_id` matches the existing installation (either defined in the JSON manifest, passed via `-a`, or typed into the interactive prompt), `dopt` will safely clear the old installation directory and install the new version in its place. No special update flags are required!
+When you run `dopt` with a new `.tar.gz` payload, as long as the `app_id` matches the existing installation (either defined in the JSON manifest, passed via `-a`, or typed into the interactive prompt), `dopt` will replace the old installation with the new version. No special update flags are required!
+
+Updates are swapped in atomically: the new version is staged next to the old one and verified first, and if anything fails mid-update the previous installation is restored. `dopt` only ever installs into, and removes, `<opt dir>/<app_id>` (`~/.local/opt/<app_id>` or `/opt/<app_id>`). If the chosen command name already belongs to a program `dopt` didn't install (for example `git`, or a script in `~/.local/bin`), it aborts and asks you to pick a different name.
 
 If you are updating via the **Interactive Wizard**, `dopt` will intelligently scan your system for existing `.desktop` files and symlinks belonging to that App ID, and auto-populate all wizard prompts for a frictionless update experience. If you forgot the App ID you used previously, simply type `?` at the first prompt to see a list of all packages installed in your target installation directory (either `~/.local/opt` or `/opt`).
 
@@ -128,16 +130,15 @@ The manifest is a JSON file that defines the application parameters. See `exampl
 
 | Field | Type | Description |
 |---|---|---|
-| `app_id` | String | A unique identifier (e.g., `com.myorg.app`). Used for naming backup files and desktop entries. |
-| `name` | String | The human-readable name of the application. |
-| `comment` | String | A short description used in the `.desktop` file. |
-| `default_install_dir` | String | Where the application should be placed if it isn't already installed (e.g., `/opt/my-app`). |
-| `binary_pattern` | String | The filename pattern of the executable inside the archive. `dopt` will search for this to symlink. |
-| `binary_path` | String | *(Optional)* The exact relative path to the binary within the archive. Overrides `binary_pattern`. |
+| `app_id` | String | **Required.** A unique identifier (e.g., `com.myorg.app`). Used as the install folder name and for desktop entries. Letters, digits, `.`, `_` and `-` only. |
+| `name` | String | *(Optional)* The human-readable name of the application. Defaults to `app_id`. |
+| `comment` | String | *(Optional)* A short description used in the `.desktop` file. |
+| `binary_pattern` | String | The filename pattern of the executable at the top level of the archive. `dopt` will search for this to symlink. Required unless `binary_path` is set. |
+| `binary_path` | String | The exact relative path to the binary within the archive. Overrides `binary_pattern`. Required unless `binary_pattern` is set. |
 | `icon_path` | String | *(Optional)* The exact relative path or filename of the icon to use for the `.desktop` file. |
-| `cli_only` | Boolean/String | Set to `"true"` if the application has no GUI. Prevents `.desktop` file creation. |
-| `symlink_as` | String | The name of the symlink created in `/usr/local/bin` (e.g., `myapp`). |
-| `categories` | String | Categories for the `.desktop` file (e.g., `Utility;Development;`). |
+| `cli_only` | Boolean/String | *(Optional)* Set to `true` if the application has no GUI. Prevents `.desktop` file creation. |
+| `symlink_as` | String | *(Optional)* The name of the command symlink created in `~/.local/bin` or `/usr/local/bin` (e.g., `myapp`). Defaults to `app_id`. |
+| `categories` | String | *(Optional)* Categories for the `.desktop` file (e.g., `Utility;Development;`). Defaults to `Utility;`. |
 | `exec_flags` | String | *(Optional)* Default flags appended to the binary in the `.desktop` Exec line. |
 | `default_url_x64` | String | The URL to download the `x86_64` Linux tarball. |
 | `default_url_arm64` | String | The URL to download the `aarch64` Linux tarball. |
@@ -156,4 +157,4 @@ The manifest is a JSON file that defines the application parameters. See `exampl
 
 - **Archive format:** Currently, `dopt` strictly expects standard `tar.gz` (`.tar.gz`) archives.
 - **Hardcoded paths:** Depending on the mode, core structural paths (`~/.local/opt`, `/opt`, `/usr/local/bin`) are hardcoded into the engine logic.
-- **Deletions:** The update process deletes the existing `INSTALL_DIR` before copying the new framework. While safeguards exist to protect core OS directories, misconfigurations could still be dangerous. Use with caution!
+- **Install location:** Applications always live in `<opt dir>/<app_id>`; custom install directories are not supported.

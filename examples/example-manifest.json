@@ -2,7 +2,6 @@
   "app_id": "com.example.app",
   "name": "Example App",
   "comment": "An example application managed by dopt",
-  "default_install_dir": "/opt/example-app",
   "binary_pattern": "example-bin",
   "binary_path": "bin/example-bin",
   "icon_path": "icon.png",

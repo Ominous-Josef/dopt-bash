@@ -35,7 +35,7 @@ show_help() {
     echo "Modifiers:"
     echo "  -g, --global            Install system-wide to /opt (requires sudo)"
     echo "  -c, --cleanup           Delete downloaded installer archive after a successful setup"
-    echo "  -i, --install           Force run a fresh setup without checking prompts"
+    echo "  -i, --install           Skip confirmation prompts; auto-terminate and relaunch a running app"
     echo "  -h, --help              Show this help menu"
     echo ""
     echo "Documentation & Examples:"
@@ -43,8 +43,23 @@ show_help() {
     echo "  Manifest template:  See 'examples/example-manifest.json'"
 }
 
+# Allowlist for anything used as a path component (app IDs, symlink names)
+NAME_REGEX='^[A-Za-z0-9][A-Za-z0-9._-]*$'
+
+validate_name() {
+    local label="$1" value="$2"
+    if [[ ! "$value" =~ $NAME_REGEX || "$value" == *".."* ]]; then
+        echo "[-] CRITICAL: Security abort. Invalid $label '$value' (allowed: letters, digits, '.', '_', '-'; must not start with a symbol or contain '..')." >&2
+        exit 1
+    fi
+}
+
+manifest_get() {
+    jq -r --arg k "$1" '.[$k] // empty' "$MANIFEST"
+}
 
 # 1. Parse command-line inputs
+ORIG_ARGS=("$@")
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -m|--manifest) MANIFEST="$2"; shift 2 ;;
@@ -100,7 +115,8 @@ fi
 
 # 3. Resolve App ID
 if [[ -n "$MANIFEST" && -f "$MANIFEST" ]]; then
-    APP_ID=$(jq -r '.app_id' "$MANIFEST")
+    APP_ID=$(manifest_get app_id)
+    [[ -z "$APP_ID" ]] && { echo "[-] Error: Manifest is missing required field 'app_id'." >&2; exit 1; }
 else
     APP_ID="${APP_ID_CLI:-}"
     if [[ -z "$APP_ID" ]]; then
@@ -121,6 +137,17 @@ else
     fi
     [[ -z "$APP_ID" ]] && { echo "[-] Error: App ID is required."; exit 1; }
 fi
+validate_name "App ID" "$APP_ID"
+
+# Defaults auto-populated from a previous installation (and from the global app when going local)
+DEF_APP_NAME=""
+DEF_SYMLINK_NAME=""
+DEF_CLI_ANS=""
+DEF_BINARY_PATTERN=""
+DEF_ICON_MANIFEST=""
+DEF_CATEGORIES=""
+LEGACY_DESKTOP_FILE=""
+APPEND_LOCAL_NAME=false
 
 if [ "$GLOBAL_INSTALL" = false ] && [[ -d "/opt/$APP_ID" ]]; then
     echo -e "\n[!] Found existing system-wide installation of $APP_ID at /opt/$APP_ID."
@@ -131,10 +158,11 @@ if [ "$GLOBAL_INSTALL" = false ] && [[ -d "/opt/$APP_ID" ]]; then
     case "$action_res" in
         1)
             echo "[*] Elevating privileges..."
-            if [[ ! " $* " =~ " -a " && ! " $* " =~ " --app-id " && ! " $* " =~ " -m " ]]; then
-                exec sudo "$0" -g "$@" -a "$APP_ID"
+            SELF_PATH=$(readlink -f "$0")
+            if [[ -z "$MANIFEST" && -z "${APP_ID_CLI:-}" ]]; then
+                exec sudo "$SELF_PATH" -g "${ORIG_ARGS[@]}" -a "$APP_ID"
             else
-                exec sudo "$0" -g "$@"
+                exec sudo "$SELF_PATH" -g "${ORIG_ARGS[@]}"
             fi
             ;;
         2)
@@ -147,10 +175,10 @@ if [ "$GLOBAL_INSTALL" = false ] && [[ -d "/opt/$APP_ID" ]]; then
                     [[ -n "$GLOBAL_NAME" ]] && DEF_APP_NAME="$GLOBAL_NAME (Local)"
                 fi
                 APP_ID="${APP_ID}-local"
+                validate_name "App ID" "$APP_ID"
                 APPEND_LOCAL_NAME=true
                 echo "[i] App ID updated to: $APP_ID"
             fi
-            IGNORE_GLOBAL_MATCH=true
             ;;
         *)
             echo "[-] Deployment aborted."
@@ -200,14 +228,6 @@ elif [[ -n "$FILE_PATH" ]]; then
 fi
 
 # Extract legacy state for auto-population and cleanup
-DEF_APP_NAME=""
-DEF_SYMLINK_NAME=""
-DEF_CLI_ANS=""
-DEF_BINARY_PATTERN=""
-DEF_ICON_MANIFEST=""
-DEF_CATEGORIES=""
-LEGACY_DESKTOP_FILE=""
-
 if [[ -d "$OPT_DIR/$APP_ID" ]]; then
     DESKTOP_SEARCH_PATHS=(
         "$DESKTOP_DIR"
@@ -253,16 +273,22 @@ fi
 
 # Ingest and extract remaining values
 if [[ -n "$MANIFEST" && -f "$MANIFEST" ]]; then
-    APP_NAME=$(jq -r '.name' "$MANIFEST")
-    APP_COMMENT=$(jq -r '.comment' "$MANIFEST")
-    DEFAULT_INSTALL_DIR="$OPT_DIR/$APP_ID"
-    BINARY_PATTERN=$(jq -r '.binary_pattern' "$MANIFEST")
-    BINARY_PATH=$(jq -r '.binary_path' "$MANIFEST")
-    ICON_PATH_MANIFEST=$(jq -r '.icon_path' "$MANIFEST")
-    CLI_ONLY=$(jq -r '.cli_only' "$MANIFEST")
-    SYMLINK_NAME=$(jq -r '.symlink_as' "$MANIFEST")
-    APP_CATEGORIES=$(jq -r '.categories' "$MANIFEST")
-    EXEC_FLAGS=$(jq -r '.exec_flags' "$MANIFEST")
+    APP_NAME=$(manifest_get name)
+    APP_NAME=${APP_NAME:-$APP_ID}
+    APP_COMMENT=$(manifest_get comment)
+    BINARY_PATTERN=$(manifest_get binary_pattern)
+    BINARY_PATH=$(manifest_get binary_path)
+    if [[ -z "$BINARY_PATTERN" && -z "$BINARY_PATH" ]]; then
+        echo "[-] Error: Manifest must define 'binary_path' or 'binary_pattern'." >&2
+        exit 1
+    fi
+    ICON_PATH_MANIFEST=$(manifest_get icon_path)
+    CLI_ONLY=$(manifest_get cli_only)
+    SYMLINK_NAME=$(manifest_get symlink_as)
+    SYMLINK_NAME=${SYMLINK_NAME:-$APP_ID}
+    APP_CATEGORIES=$(manifest_get categories)
+    APP_CATEGORIES=${APP_CATEGORIES:-Utility;}
+    EXEC_FLAGS=$(manifest_get exec_flags)
 else
     [[ -d "$OPT_DIR/$APP_ID" ]] && echo "[*] Existing installation detected. Auto-populating defaults..."
     
@@ -283,8 +309,7 @@ else
     fi
     
     APP_COMMENT=""
-    DEFAULT_INSTALL_DIR="$OPT_DIR/$APP_ID"
-    
+
     read -r -p "[?] Enter target binary name to link [${DEF_BINARY_PATTERN:-$SYMLINK_NAME}]: " BINARY_PATTERN
     BINARY_PATTERN=${BINARY_PATTERN:-${DEF_BINARY_PATTERN:-$SYMLINK_NAME}}
     BINARY_PATH=""
@@ -301,59 +326,77 @@ else
     EXEC_FLAGS=""
 fi
 
-# Input Sanitization
-if [[ "$APP_ID" == *"/"* || "$APP_ID" == *".."* || "$SYMLINK_NAME" == *"/"* || "$SYMLINK_NAME" == *".."* ]]; then
-    echo "[-] CRITICAL: Security abort. APP_ID and SYMLINK_NAME cannot contain path traversal characters (/, ..)." >&2
-    exit 1
+validate_name "symlink name" "$SYMLINK_NAME"
+
+if [[ "$APPEND_LOCAL_NAME" = true && "$APP_NAME" != *" (Local)" ]]; then
+    APP_NAME="$APP_NAME (Local)"
 fi
 
 BIN_LINK="$BIN_LINK_DIR/$SYMLINK_NAME"
-INSTALL_DIR=""
+# dopt only ever installs into (and deletes) $OPT_DIR/$APP_ID
+INSTALL_DIR="$OPT_DIR/$APP_ID"
+STAGE_DIR="$OPT_DIR/.${APP_ID}.dopt-new"
+BACKUP_DIR="$OPT_DIR/.${APP_ID}.dopt-old"
 
-# 4. Resolve active system path bindings
-echo "[*] Auditing environment path structures for $APP_NAME..."
-if [[ "${IGNORE_GLOBAL_MATCH:-false}" == "true" ]]; then
-    EXISTING_BIN=""
-else
-    if [[ $EUID -eq 0 ]]; then
-        EXISTING_BIN=$(sudo -u "$REAL_USER" which "$SYMLINK_NAME" 2>/dev/null || true)
-    else
-        EXISTING_BIN=$(which "$SYMLINK_NAME" 2>/dev/null || true)
-    fi
-fi
-
-if [[ -f "$BIN_LINK" ]]; then
-    INSTALL_DIR=$(dirname "$(readlink -f "$BIN_LINK")")
-    # Adjust install dir upward if it points deep into a nested binary folder
-    if [[ -n "$BINARY_PATH" && "$BINARY_PATH" != "null" ]]; then
-        DEPTH=$(echo "$BINARY_PATH" | tr -cd '/' | wc -c)
-        for ((i=0; i<=DEPTH; i++)); do INSTALL_DIR=$(dirname "$INSTALL_DIR"); done
-    fi
-    echo "[+] Map match: Found existing installation via symlink at $INSTALL_DIR"
-elif [[ -n "$EXISTING_BIN" ]]; then
-    INSTALL_DIR=$(dirname "$(readlink -f "$EXISTING_BIN")")
-    if [[ -n "$BINARY_PATH" && "$BINARY_PATH" != "null" ]]; then
-        DEPTH=$(echo "$BINARY_PATH" | tr -cd '/' | wc -c)
-        for ((i=0; i<=DEPTH; i++)); do INSTALL_DIR=$(dirname "$INSTALL_DIR"); done
-    fi
-    echo "[+] Map match: Found existing installation via environment PATH at $INSTALL_DIR"
-else
-    INSTALL_DIR="$DEFAULT_INSTALL_DIR"
-    if [ "$FORCE_INSTALL" = false ]; then
-        echo ""
-        read -r -p "[?] No version found. Perform a clean installation of $APP_NAME at $INSTALL_DIR? [Y/n]: " inst_res
-        if [[ "${inst_res,,}" =~ ^(no|n) ]]; then
-            echo "[-] Deployment aborted."
-            exit 0
-        fi
-    fi
-fi
-
-if [ "$GLOBAL_INSTALL" = false ]; then
-    if [[ "$INSTALL_DIR" == "/opt/"* || "$INSTALL_DIR" == "/usr/"* ]]; then
-        echo "[-] Error: Found existing system-wide installation at $INSTALL_DIR." >&2
-        echo "[-] You cannot update a global installation in local mode. Please re-run the command with sudo and the --global (-g) flag." >&2
+# Refuse to modify any path that isn't a direct child of $OPT_DIR managed by dopt
+assert_managed_dir() {
+    local target parent name
+    target=$(readlink -m -- "$1")
+    parent=$(dirname -- "$target")
+    name=$(basename -- "$target")
+    if [[ "$parent" != "$(readlink -m -- "$OPT_DIR")" ]] ||
+       [[ ! "${name#.}" =~ $NAME_REGEX || "$name" == *".."* ]] ||
+       [[ "$name" != "$APP_ID" && "$name" != ".${APP_ID}.dopt-new" && "$name" != ".${APP_ID}.dopt-old" ]]; then
+        echo "[-] CRITICAL: Safety abort. Refusing to modify $target (outside dopt's managed directory $OPT_DIR)." >&2
         exit 1
+    fi
+}
+
+# True if $1 resolves to a path inside $2/
+path_is_inside() {
+    local resolved
+    resolved=$(readlink -m -- "$1")
+    [[ "$resolved" == "$(readlink -m -- "$2")/"* ]]
+}
+
+# 4. Make sure the command name doesn't belong to something dopt didn't install
+echo "[*] Auditing environment path structures for $APP_NAME..."
+if [[ -e "$BIN_LINK" || -L "$BIN_LINK" ]]; then
+    if [[ ! -L "$BIN_LINK" ]] || ! path_is_inside "$(readlink -- "$BIN_LINK")" "$INSTALL_DIR"; then
+        echo "[-] Error: $BIN_LINK already exists and wasn't installed by dopt for $APP_ID." >&2
+        echo "[-] Choose a different symlink name (manifest 'symlink_as' or the wizard prompt)." >&2
+        exit 1
+    fi
+fi
+
+if [[ $EUID -eq 0 ]]; then
+    EXISTING_BIN=$(sudo -u "$REAL_USER" bash -lc 'command -v -- "$1" || true' _ "$SYMLINK_NAME" 2>/dev/null | tail -n 1 || true)
+else
+    EXISTING_BIN=$(command -v -- "$SYMLINK_NAME" 2>/dev/null || true)
+fi
+
+if [[ "$EXISTING_BIN" == /* && "$EXISTING_BIN" != "$BIN_LINK" ]]; then
+    BASE_APP_ID="${APP_ID%-local}"
+    if path_is_inside "$EXISTING_BIN" "$INSTALL_DIR" ||
+       path_is_inside "$EXISTING_BIN" "/opt/$BASE_APP_ID" ||
+       path_is_inside "$EXISTING_BIN" "$USER_HOME/.local/opt/$BASE_APP_ID" ||
+       path_is_inside "$EXISTING_BIN" "$USER_HOME/.local/opt/$BASE_APP_ID-local"; then
+        echo "[!] Warning: '$SYMLINK_NAME' also resolves to $EXISTING_BIN (another installation of this app). Whichever comes first in PATH will run."
+    else
+        echo "[-] Error: The command '$SYMLINK_NAME' already exists at $EXISTING_BIN and wasn't installed by dopt for $APP_ID." >&2
+        echo "[-] Choose a different symlink name (manifest 'symlink_as' or the wizard prompt)." >&2
+        exit 1
+    fi
+fi
+
+if [[ -d "$INSTALL_DIR" ]]; then
+    echo "[+] Map match: Found existing installation at $INSTALL_DIR"
+elif [ "$FORCE_INSTALL" = false ]; then
+    echo ""
+    read -r -p "[?] No version found. Perform a clean installation of $APP_NAME at $INSTALL_DIR? [Y/n]: " inst_res
+    if [[ "${inst_res,,}" =~ ^(no|n) ]]; then
+        echo "[-] Deployment aborted."
+        exit 0
     fi
 fi
 
@@ -361,6 +404,13 @@ fi
 TMP_DIR=$(mktemp -d -t dopt-workspace-XXXXXXXX)
 cleanup_workspace() {
     local exit_code=$?
+    # Roll back an interrupted swap and drop any half-built staging copy
+    if [[ -d "$BACKUP_DIR" && ! -e "$INSTALL_DIR" ]]; then
+        if mv -- "$BACKUP_DIR" "$INSTALL_DIR" 2>/dev/null; then
+            echo -e "\n[i] Update failed. The previous installation was restored at $INSTALL_DIR"
+        fi
+    fi
+    [[ -e "$STAGE_DIR" ]] && rm -rf -- "$STAGE_DIR"
     if [[ $exit_code -ne 0 && "$DOWNLOAD" = true && -f "${TARBALL:-}" && "$CLEANUP" = false ]]; then
         URL_FILE_NAME=$(basename "${DOWNLOAD_URL:-}" | sed 's/%20/ /g')
         [[ "$URL_FILE_NAME" == "download"* || -z "$URL_FILE_NAME" ]] && URL_FILE_NAME="${APP_ID}-linux.tar.gz"
@@ -393,12 +443,12 @@ if [ "$DOWNLOAD" = true ]; then
     if [[ -n "$CUSTOM_URL" ]]; then
         DOWNLOAD_URL="$CUSTOM_URL"
     elif [[ -n "$MANIFEST" && -f "$MANIFEST" ]]; then
-        DOWNLOAD_URL=$(jq -r --arg key "$ARCH_KEY" '.[$key]' "$MANIFEST")
+        DOWNLOAD_URL=$(manifest_get "$ARCH_KEY")
     else
         DOWNLOAD_URL=""
     fi
     
-    if [[ -z "$DOWNLOAD_URL" || "$DOWNLOAD_URL" == "null" ]]; then
+    if [[ -z "$DOWNLOAD_URL" ]]; then
         echo "[-] Error: No download URL provided. Use -u <url> if not using a manifest." >&2
         exit 1
     fi
@@ -426,125 +476,141 @@ EXTRACTED_FOLDER=$(find "$TMP_DIR" -mindepth 1 -maxdepth 2 -type d -iname "*${AP
 [[ -z "$EXTRACTED_FOLDER" ]] && EXTRACTED_FOLDER=$(find "$TMP_DIR" -mindepth 1 -maxdepth 1 -type d | head -n 1)
 [[ -z "$EXTRACTED_FOLDER" ]] && EXTRACTED_FOLDER="$TMP_DIR"
 
-# Dynamic nested folder bypass check
-if [[ -n "$BINARY_PATH" && "$BINARY_PATH" != "null" ]]; then
-    LOCAL_BIN="$EXTRACTED_FOLDER/$BINARY_PATH"
-else
-    LOCAL_BIN=$(find "$EXTRACTED_FOLDER" -maxdepth 1 -type f -iname "$BINARY_PATTERN" | head -n 1)
-    [[ -z "$LOCAL_BIN" ]] && LOCAL_BIN=$(find "$EXTRACTED_FOLDER" -maxdepth 1 -type f -executable ! -name "chrome-sandbox" ! -name "crashpad_handler" | head -n 1)
+# 7. Stage the new version next to the live one, so the swap is a pair of renames
+if [[ ! -w "$OPT_DIR" ]]; then
+    echo "[-] Error: Permission denied. You do not have write access to $OPT_DIR." >&2
+    if [[ "$OPT_DIR" == "/opt" ]]; then
+        echo "[i] This is a system-wide installation. Try running dopt with sudo and the --global flag." >&2
+    fi
+    exit 1
 fi
 
-if [[ -n "$LOCAL_BIN" && -f "$LOCAL_BIN" ]]; then
-    RUNNING_BIN_NAME=$(basename "$LOCAL_BIN")
-    # Escape special regex characters to prevent regex injection attacks via pgrep/pkill
-    ESCAPED_BIN_NAME=$(echo "$RUNNING_BIN_NAME" | sed 's/[^a-zA-Z0-9_-]/\\&/g')
-    
-    if pgrep -u "$REAL_USER" -f "$ESCAPED_BIN_NAME" > /dev/null 2>&1; then
-        if [ "$FORCE_INSTALL" = true ]; then
-            echo -e "\n[!] Warning: Forced installation active. Automatically terminating active processes for update..."
-            pkill -u "$REAL_USER" -f "$ESCAPED_BIN_NAME" || true; sleep 1.5
-            pkill -9 -u "$REAL_USER" -f "$ESCAPED_BIN_NAME" || true
+assert_managed_dir "$STAGE_DIR"
+assert_managed_dir "$BACKUP_DIR"
+# Recover from a previous run that was interrupted mid-swap, then clear leftovers
+if [[ -d "$BACKUP_DIR" && ! -e "$INSTALL_DIR" ]]; then
+    mv -- "$BACKUP_DIR" "$INSTALL_DIR"
+fi
+rm -rf -- "$STAGE_DIR" "$BACKUP_DIR"
+
+echo "[*] Synchronizing updated frameworks into staging path..."
+mkdir -p "$STAGE_DIR"
+cp -R "$EXTRACTED_FOLDER"/. "$STAGE_DIR/"
+
+if [[ -n "$BINARY_PATH" ]]; then
+    STAGED_BINARY="$STAGE_DIR/$BINARY_PATH"
+else
+    STAGED_BINARY=$(find "$STAGE_DIR" -maxdepth 1 -type f -iname "$BINARY_PATTERN" | head -n 1)
+    [[ -z "$STAGED_BINARY" ]] && STAGED_BINARY=$(find "$STAGE_DIR" -maxdepth 1 -type f -executable ! -name "chrome-sandbox" ! -name "crashpad_handler" | head -n 1)
+fi
+
+if [[ -z "$STAGED_BINARY" || ! -f "$STAGED_BINARY" ]] || ! path_is_inside "$STAGED_BINARY" "$STAGE_DIR"; then
+    echo "[-] Critical Error: Execution file vector verification failed inside the new package. The existing installation was not touched." >&2
+    exit 1
+fi
+BINARY_REL_PATH="${STAGED_BINARY#"$STAGE_DIR"/}"
+
+# Processes whose executable (or argv[0]) lives inside the install dir or is the app's symlink
+find_app_pids() {
+    local pid exe argv0 install_real
+    [[ -d "$INSTALL_DIR" ]] || return 0
+    install_real=$(readlink -m -- "$INSTALL_DIR")
+    for pid in $(pgrep -u "$REAL_USER" 2>/dev/null || true); do
+        [[ "$pid" == "$$" ]] && continue
+        exe=$(readlink -- "/proc/$pid/exe" 2>/dev/null || true)
+        argv0=""
+        { IFS= read -r -d '' argv0 < "/proc/$pid/cmdline"; } 2>/dev/null || true
+        if [[ "$exe" == "$install_real/"* || "$argv0" == "$install_real/"* ||
+              "$argv0" == "$INSTALL_DIR/"* || "$argv0" == "$BIN_LINK" ]]; then
+            echo "$pid"
+        fi
+    done
+}
+
+terminate_app() {
+    local pid alive
+    kill -TERM "$@" 2>/dev/null || true
+    for _ in {1..30}; do
+        alive=false
+        for pid in "$@"; do kill -0 "$pid" 2>/dev/null && alive=true; done
+        [[ "$alive" = false ]] && return 0
+        sleep 0.1
+    done
+    kill -KILL "$@" 2>/dev/null || true
+}
+
+mapfile -t APP_PIDS < <(find_app_pids)
+if [[ ${#APP_PIDS[@]} -gt 0 ]]; then
+    if [ "$FORCE_INSTALL" = true ]; then
+        echo -e "\n[!] Warning: Forced installation active. Automatically terminating active processes for update..."
+        terminate_app "${APP_PIDS[@]}"
+        if [[ "$CLI_ONLY" != "true" ]]; then RESTART_REQD=true; fi
+    else
+        echo -e "\n[!] Active Process Block: $APP_NAME is currently running."
+        read -r -p "[?] Kill process to deploy update? [Y/n]: " run_res
+        if [[ ! "${run_res,,}" =~ ^(no|n) ]]; then
+            terminate_app "${APP_PIDS[@]}"
             if [[ "$CLI_ONLY" != "true" ]]; then RESTART_REQD=true; fi
         else
-            echo -e "\n[!] Active Process Block: $APP_NAME is currently running."
-            read -r -p "[?] Kill process to deploy update? [Y/n]: " run_res
-            if [[ ! "${run_res,,}" =~ ^(no|n) ]]; then
-                pkill -u "$REAL_USER" -f "$ESCAPED_BIN_NAME" || true; sleep 1.5
-                pkill -9 -u "$REAL_USER" -f "$ESCAPED_BIN_NAME" || true
-                if [[ "$CLI_ONLY" != "true" ]]; then RESTART_REQD=true; fi
-            else
-                echo "[-] Update cycle canceled to keep app active."
-                RESUME_FILE=""
-                if [ "$DOWNLOAD" = true ]; then
-                    if [ "$CLEANUP" = false ]; then
-                        URL_FILE_NAME=$(basename "$DOWNLOAD_URL" | sed 's/%20/ /g')
-                        [[ "$URL_FILE_NAME" == "download"* || -z "$URL_FILE_NAME" ]] && URL_FILE_NAME="${APP_ID}-linux.tar.gz"
-                        OUTPUT_DEST="$(pwd)/$URL_FILE_NAME"
-                        mv -f -- "$TARBALL" "$OUTPUT_DEST"
-                        [[ -n "${SUDO_USER:-}" ]] && chown -- "${SUDO_USER}:" "$OUTPUT_DEST"
-                        echo "[i] The downloaded update archive has been preserved at: $OUTPUT_DEST"
-                        RESUME_FILE="$OUTPUT_DEST"
-                    fi
-                elif [[ -n "${FILE_PATH:-}" ]]; then
-                    RESUME_FILE="$FILE_PATH"
-                elif [[ -n "${TARBALL:-}" ]]; then
-                    RESUME_FILE="$TARBALL"
+            echo "[-] Update cycle canceled to keep app active."
+            RESUME_FILE=""
+            if [ "$DOWNLOAD" = true ]; then
+                if [ "$CLEANUP" = false ]; then
+                    URL_FILE_NAME=$(basename "$DOWNLOAD_URL" | sed 's/%20/ /g')
+                    [[ "$URL_FILE_NAME" == "download"* || -z "$URL_FILE_NAME" ]] && URL_FILE_NAME="${APP_ID}-linux.tar.gz"
+                    OUTPUT_DEST="$(pwd)/$URL_FILE_NAME"
+                    mv -f -- "$TARBALL" "$OUTPUT_DEST"
+                    [[ -n "${SUDO_USER:-}" ]] && chown -- "${SUDO_USER}:" "$OUTPUT_DEST"
+                    echo "[i] The downloaded update archive has been preserved at: $OUTPUT_DEST"
+                    RESUME_FILE="$OUTPUT_DEST"
                 fi
-                
-                if [[ -n "$RESUME_FILE" ]]; then
-                    echo -e "\n[!] To apply this update later without re-downloading, run:"
-                    if [[ -n "$MANIFEST" && -f "$MANIFEST" ]]; then
-                        echo "    sudo ./dopt.sh -m \"$MANIFEST\" -f \"$RESUME_FILE\""
-                    else
-                        echo "    sudo ./dopt.sh -a \"$APP_ID\" -f \"$RESUME_FILE\""
-                    fi
-                fi
-                exit 0
+            elif [[ -n "${FILE_PATH:-}" ]]; then
+                RESUME_FILE="$FILE_PATH"
+            elif [[ -n "${TARBALL:-}" ]]; then
+                RESUME_FILE="$TARBALL"
             fi
+
+            if [[ -n "$RESUME_FILE" ]]; then
+                echo -e "\n[!] To apply this update later without re-downloading, run:"
+                if [[ -n "$MANIFEST" && -f "$MANIFEST" ]]; then
+                    echo "    sudo ./dopt.sh -m \"$MANIFEST\" -f \"$RESUME_FILE\""
+                else
+                    echo "    sudo ./dopt.sh -a \"$APP_ID\" -f \"$RESUME_FILE\""
+                fi
+            fi
+            exit 0
         fi
     fi
 fi
 
-# 7. File Erasure and Allocation
-INSTALL_DIR=$(readlink -m "$INSTALL_DIR")
-SAFE_DIRS=("/" "/usr" "/bin" "/etc" "/var" "/opt" "/home" "/usr/local" "/usr/share" "/usr/local/bin" "$USER_HOME" "$USER_HOME/.local" "$USER_HOME/.local/opt" "$USER_HOME/.local/bin" "$USER_HOME/.local/share")
-for safe_dir in "${SAFE_DIRS[@]}"; do
-    if [[ "$INSTALL_DIR" == "$safe_dir" ]]; then
-        echo "[-] CRITICAL: Safety abort. Attempted to delete system directory: $INSTALL_DIR" >&2
-        exit 1
-    fi
-done
-
-if [[ -e "$INSTALL_DIR" && ! -w "$INSTALL_DIR" ]]; then
-    echo "[-] Error: Permission denied. You do not have write access to $INSTALL_DIR." >&2
-    if [[ "$INSTALL_DIR" == "/opt/"* || "$INSTALL_DIR" == "/usr/"* ]]; then
-        echo "[i] This appears to be a system-wide installation. Try running dopt with sudo and the --global flag." >&2
-    fi
-    exit 1
-elif [[ ! -e "$INSTALL_DIR" ]]; then
-    PARENT_DIR=$(dirname "$INSTALL_DIR")
-    if [[ ! -w "$PARENT_DIR" ]]; then
-        echo "[-] Error: Permission denied. You do not have write access to create $INSTALL_DIR." >&2
-        exit 1
-    fi
+# Swap: live -> backup, staged -> live, then drop the backup. The exit trap restores the backup on failure.
+assert_managed_dir "$INSTALL_DIR"
+echo "[*] Swapping in the new version to clear stale libraries..."
+if [[ -e "$INSTALL_DIR" ]]; then
+    mv -- "$INSTALL_DIR" "$BACKUP_DIR"
 fi
+mv -- "$STAGE_DIR" "$INSTALL_DIR"
+rm -rf -- "$BACKUP_DIR"
 
-echo "[*] Deep cleaning legacy directory mappings to clear stale libraries..."
-rm -rf -- "$INSTALL_DIR"
-mkdir -p "$INSTALL_DIR"
-
-echo "[*] Synchronizing updated frameworks into installation path..."
-cp -R "$EXTRACTED_FOLDER"/. "$INSTALL_DIR/"
-
-if [[ -n "$BINARY_PATH" && "$BINARY_PATH" != "null" ]]; then
-    REAL_BINARY="$INSTALL_DIR/$BINARY_PATH"
-else
-    REAL_BINARY=$(find "$INSTALL_DIR" -maxdepth 1 -type f -iname "$BINARY_PATTERN" | head -n 1)
-    [[ -z "$REAL_BINARY" ]] && REAL_BINARY=$(find "$INSTALL_DIR" -maxdepth 1 -type f -executable ! -name "chrome-sandbox" ! -name "crashpad_handler" | head -n 1)
-fi
-
-if [[ -z "$REAL_BINARY" || ! -f "$REAL_BINARY" ]]; then
-    echo "[-] Critical Error: Execution file vector verification failed inside installation target." >&2
-    exit 1
-fi
+REAL_BINARY="$INSTALL_DIR/$BINARY_REL_PATH"
 
 if [[ -n "${DEF_SYMLINK_NAME:-}" && "$DEF_SYMLINK_NAME" != "$SYMLINK_NAME" ]]; then
     OLD_BIN_LINK="$BIN_LINK_DIR/$DEF_SYMLINK_NAME"
-    if [[ -L "$OLD_BIN_LINK" || -f "$OLD_BIN_LINK" ]]; then
+    if [[ -L "$OLD_BIN_LINK" ]] && path_is_inside "$(readlink -- "$OLD_BIN_LINK")" "$INSTALL_DIR"; then
         echo "[*] Cleaning up legacy symlink at $OLD_BIN_LINK..."
-        rm -f "$OLD_BIN_LINK"
+        rm -f -- "$OLD_BIN_LINK"
     fi
 fi
 
 chmod +x "$REAL_BINARY"
-ln -sf "$REAL_BINARY" "$BIN_LINK"
+ln -sfn "$REAL_BINARY" "$BIN_LINK"
 
 # 8. Dynamic Linux Desktop Icon Integration Layout
 if [[ "$CLI_ONLY" != "true" ]]; then
     echo "[*] Scanning workspace assets for Application Desktop Graphics..."
     ICON_PATH=""
     
-    if [[ -n "${ICON_PATH_MANIFEST:-}" && "$ICON_PATH_MANIFEST" != "null" ]]; then
+    if [[ -n "${ICON_PATH_MANIFEST:-}" ]]; then
         if [[ -f "$INSTALL_DIR/$ICON_PATH_MANIFEST" ]]; then
             ICON_PATH="$INSTALL_DIR/$ICON_PATH_MANIFEST"
         else
