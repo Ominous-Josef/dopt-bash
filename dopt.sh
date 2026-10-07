@@ -15,6 +15,7 @@ FORCE_INSTALL=false
 SEARCH_DIR="."
 FILE_PATH=""
 CUSTOM_URL=""
+SYMLINK_CLI=""
 RESTART_REQD=false
 GLOBAL_INSTALL=false
 
@@ -25,6 +26,7 @@ show_help() {
     echo "Manifest (Optional):"
     echo "  -m, --manifest <json>   The application manifest recipe configuration file"
     echo "  -a, --app-id <id>       Provide App ID directly if not using a manifest"
+    echo "  -s, --symlink-as <name> Command name to link (overrides the manifest's 'symlink_as')"
     echo ""
     echo "Deployment Targets (Choose one. Defaults to scanning '.' if omitted):"
     echo "  -d, --download          Download using the manifest's default server endpoint"
@@ -46,10 +48,16 @@ show_help() {
 # Allowlist for anything used as a path component (app IDs, symlink names)
 NAME_REGEX='^[A-Za-z0-9][A-Za-z0-9._-]*$'
 
+NAME_RULES="allowed: letters, digits, '.', '_', '-'; must not start with a symbol or contain '..'"
+
+is_valid_name() {
+    [[ "$1" =~ $NAME_REGEX && "$1" != *".."* ]]
+}
+
 validate_name() {
     local label="$1" value="$2"
-    if [[ ! "$value" =~ $NAME_REGEX || "$value" == *".."* ]]; then
-        echo "[-] CRITICAL: Security abort. Invalid $label '$value' (allowed: letters, digits, '.', '_', '-'; must not start with a symbol or contain '..')." >&2
+    if ! is_valid_name "$value"; then
+        echo "[-] CRITICAL: Security abort. Invalid $label '$value' ($NAME_RULES)." >&2
         exit 1
     fi
 }
@@ -58,12 +66,29 @@ manifest_get() {
     jq -r --arg k "$1" '.[$k] // empty' "$MANIFEST"
 }
 
+# Sets OWNER_PKG/OWNER_TOOL if a system package owns the directory (or a few files inside it)
+package_owner() {
+    local f out
+    OWNER_PKG=""
+    OWNER_TOOL=""
+    while IFS= read -r f; do
+        if command -v rpm >/dev/null 2>&1 && out=$(rpm -qf --qf '%{NAME}\n' -- "$f" 2>/dev/null); then
+            OWNER_PKG=$(head -n 1 <<< "$out"); OWNER_TOOL="dnf"; return 0
+        fi
+        if command -v dpkg >/dev/null 2>&1 && out=$(dpkg -S -- "$f" 2>/dev/null); then
+            OWNER_PKG=$(head -n 1 <<< "$out" | cut -d: -f1 | cut -d, -f1); OWNER_TOOL="apt"; return 0
+        fi
+    done < <({ printf '%s\n' "$1"; find "$1" -maxdepth 2 -type f 2>/dev/null | head -n 5; })
+    return 1
+}
+
 # 1. Parse command-line inputs
 ORIG_ARGS=("$@")
 while [[ $# -gt 0 ]]; do
     case "$1" in
         -m|--manifest) MANIFEST="$2"; shift 2 ;;
         -a|--app-id)   APP_ID_CLI="$2"; shift 2 ;;
+        -s|--symlink-as) SYMLINK_CLI="$2"; shift 2 ;;
         -d|--download) DOWNLOAD=true; shift ;;
         -c|--cleanup)  CLEANUP=true; shift ;;
         -g|--global)   GLOBAL_INSTALL=true; shift ;;
@@ -146,7 +171,6 @@ DEF_CLI_ANS=""
 DEF_BINARY_PATTERN=""
 DEF_ICON_MANIFEST=""
 DEF_CATEGORIES=""
-LEGACY_DESKTOP_FILE=""
 APPEND_LOCAL_NAME=false
 
 if [ "$GLOBAL_INSTALL" = false ] && [[ -d "/opt/$APP_ID" ]]; then
@@ -227,47 +251,24 @@ elif [[ -n "$FILE_PATH" ]]; then
     fi
 fi
 
-# Extract legacy state for auto-population and cleanup
+# Defaults from the previous installation: only look where dopt itself writes
+DESKTOP_FILE="$DESKTOP_DIR/${APP_ID}.desktop"
 if [[ -d "$OPT_DIR/$APP_ID" ]]; then
-    DESKTOP_SEARCH_PATHS=(
-        "$DESKTOP_DIR"
-        "/usr/share/applications"
-        "/usr/local/share/applications"
-        "$USER_HOME/.local/share/applications"
-        "$OPT_DIR/$APP_ID"
-    )
-    for dp in "${DESKTOP_SEARCH_PATHS[@]}"; do
-        if [[ -f "$dp/${APP_ID}.desktop" ]]; then
-            EXEC_VAL=$(grep "^Exec=" "$dp/${APP_ID}.desktop" | cut -d= -f2- | awk '{print $1}' || true)
-            if [[ "$EXEC_VAL" == "/usr/local/bin/"* || "$EXEC_VAL" == "$BIN_LINK_DIR/"* || "$EXEC_VAL" == "/opt/"* || "$EXEC_VAL" == "$OPT_DIR/"* ]]; then
-                LEGACY_DESKTOP_FILE="$dp/${APP_ID}.desktop"
-                break
-            fi
-        fi
-    done
+    EXISTING_LINK=$(find "$BIN_LINK_DIR" -maxdepth 1 -type l -lname "$OPT_DIR/$APP_ID/*" 2>/dev/null | head -n 1 || true)
+    if [[ -n "$EXISTING_LINK" ]]; then
+        DEF_SYMLINK_NAME=$(basename "$EXISTING_LINK")
+        DEF_BINARY_PATTERN=$(basename "$(readlink -- "$EXISTING_LINK")")
+    fi
 
-    if [[ -n "$LEGACY_DESKTOP_FILE" ]]; then
-        DEF_APP_NAME=$(grep "^Name=" "$LEGACY_DESKTOP_FILE" | cut -d= -f2- || true)
-        DEF_BIN_LINK=$(grep "^Exec=" "$LEGACY_DESKTOP_FILE" | cut -d= -f2- | awk '{print $1}' || true)
-        DEF_SYMLINK_NAME=$(basename "$DEF_BIN_LINK" || true)
+    if [[ -f "$DESKTOP_FILE" ]]; then
+        OLD_NAME=$(grep -m 1 "^Name=" "$DESKTOP_FILE" | cut -d= -f2- || true)
+        [[ -n "$OLD_NAME" ]] && DEF_APP_NAME="$OLD_NAME"
+        DEF_ICON_FULL=$(grep -m 1 "^Icon=" "$DESKTOP_FILE" | cut -d= -f2- || true)
+        [[ -n "$DEF_ICON_FULL" ]] && DEF_ICON_MANIFEST=$(basename "$DEF_ICON_FULL")
+        DEF_CATEGORIES=$(grep -m 1 "^Categories=" "$DESKTOP_FILE" | cut -d= -f2- || true)
         DEF_CLI_ANS="n"
-        
-        if [[ -L "$DEF_BIN_LINK" ]]; then
-            REAL_BIN=$(readlink -f "$DEF_BIN_LINK" 2>/dev/null || true)
-            [[ -n "$REAL_BIN" ]] && DEF_BINARY_PATTERN=$(basename "$REAL_BIN")
-        fi
-        
-        DEF_ICON_FULL=$(grep "^Icon=" "$LEGACY_DESKTOP_FILE" | cut -d= -f2- || true)
-        DEF_ICON_MANIFEST=$(basename "$DEF_ICON_FULL" || true)
-        DEF_CATEGORIES=$(grep "^Categories=" "$LEGACY_DESKTOP_FILE" | cut -d= -f2- || true)
-    else
-        EXISTING_LINK=$(find "$BIN_LINK_DIR" -maxdepth 1 -type l -lname "$OPT_DIR/$APP_ID/*" | head -n 1 2>/dev/null || true)
-        if [[ -n "$EXISTING_LINK" ]]; then
-            DEF_SYMLINK_NAME=$(basename "$EXISTING_LINK")
-            DEF_CLI_ANS="y"
-            REAL_BIN=$(readlink -f "$EXISTING_LINK" 2>/dev/null || true)
-            [[ -n "$REAL_BIN" ]] && DEF_BINARY_PATTERN=$(basename "$REAL_BIN")
-        fi
+    elif [[ -n "$EXISTING_LINK" ]]; then
+        DEF_CLI_ANS="y"
     fi
 fi
 
@@ -284,7 +285,7 @@ if [[ -n "$MANIFEST" && -f "$MANIFEST" ]]; then
     fi
     ICON_PATH_MANIFEST=$(manifest_get icon_path)
     CLI_ONLY=$(manifest_get cli_only)
-    SYMLINK_NAME=$(manifest_get symlink_as)
+    SYMLINK_NAME=${SYMLINK_CLI:-$(manifest_get symlink_as)}
     SYMLINK_NAME=${SYMLINK_NAME:-$APP_ID}
     APP_CATEGORIES=$(manifest_get categories)
     APP_CATEGORIES=${APP_CATEGORIES:-Utility;}
@@ -295,8 +296,12 @@ else
     read -r -p "[?] Enter Application Name [${DEF_APP_NAME:-$APP_ID}]: " APP_NAME
     APP_NAME=${APP_NAME:-${DEF_APP_NAME:-$APP_ID}}
     
-    read -r -p "[?] Enter executable symlink name [${DEF_SYMLINK_NAME:-$APP_ID}]: " SYMLINK_NAME
-    SYMLINK_NAME=${SYMLINK_NAME:-${DEF_SYMLINK_NAME:-$APP_ID}}
+    if [[ -n "$SYMLINK_CLI" ]]; then
+        SYMLINK_NAME="$SYMLINK_CLI"
+    else
+        read -r -p "[?] Enter executable symlink name [${DEF_SYMLINK_NAME:-$APP_ID}]: " SYMLINK_NAME
+        SYMLINK_NAME=${SYMLINK_NAME:-${DEF_SYMLINK_NAME:-$APP_ID}}
+    fi
     
     cli_prompt_def="[y/N]"
     [[ "${DEF_CLI_ANS,,}" == "y" ]] && cli_prompt_def="[Y/n]"
@@ -359,34 +364,112 @@ path_is_inside() {
     [[ "$resolved" == "$(readlink -m -- "$2")/"* ]]
 }
 
-# 4. Make sure the command name doesn't belong to something dopt didn't install
+# 4. Ownership: only upgrade folders dopt created (marked with .dopt), never package-managed ones
+MARKER_NAME=".dopt"
 echo "[*] Auditing environment path structures for $APP_NAME..."
-if [[ -e "$BIN_LINK" || -L "$BIN_LINK" ]]; then
-    if [[ ! -L "$BIN_LINK" ]] || ! path_is_inside "$(readlink -- "$BIN_LINK")" "$INSTALL_DIR"; then
-        echo "[-] Error: $BIN_LINK already exists and wasn't installed by dopt for $APP_ID." >&2
-        echo "[-] Choose a different symlink name (manifest 'symlink_as' or the wizard prompt)." >&2
+if [[ -d "$INSTALL_DIR" && ! -f "$INSTALL_DIR/$MARKER_NAME" ]]; then
+    if package_owner "$INSTALL_DIR"; then
+        echo "[-] Error: $INSTALL_DIR belongs to the system package '$OWNER_PKG'. dopt won't modify package-managed files." >&2
+        echo "[i] To use the tarball version, either install it alongside with a different App ID," >&2
+        echo "    or remove the package first: sudo $OWNER_TOOL remove $OWNER_PKG" >&2
         exit 1
+    fi
+    echo -e "\n[!] $INSTALL_DIR exists but wasn't installed by dopt (no $MARKER_NAME marker)."
+    echo "    Installs made by older versions of dopt ask this once."
+    if [ "$FORCE_INSTALL" = true ]; then
+        echo "[-] Error: Refusing to replace it in forced (-i) mode. Re-run without -i to confirm." >&2
+        exit 1
+    fi
+    read -r -p "[?] Replace it with the new version? [y/N]: " replace_res
+    if [[ ! "${replace_res,,}" =~ ^(yes|y)$ ]]; then
+        echo "[-] Deployment aborted. $INSTALL_DIR was not modified."
+        exit 0
     fi
 fi
 
-if [[ $EUID -eq 0 ]]; then
-    EXISTING_BIN=$(sudo -u "$REAL_USER" bash -lc 'command -v -- "$1" || true' _ "$SYMLINK_NAME" 2>/dev/null | tail -n 1 || true)
-else
-    EXISTING_BIN=$(command -v -- "$SYMLINK_NAME" 2>/dev/null || true)
-fi
+# 4.5 Make sure the command name doesn't belong to something dopt didn't install
+abort_name_clash() {
+    if [ "$FORCE_INSTALL" = true ]; then
+        echo "[-] Error: Cannot ask for a different command name in forced (-i) mode." >&2
+    fi
+    echo "[-] Deployment aborted. Re-run with -s <name> to use a different command name." >&2
+    exit 1
+}
 
-if [[ "$EXISTING_BIN" == /* && "$EXISTING_BIN" != "$BIN_LINK" ]]; then
-    BASE_APP_ID="${APP_ID%-local}"
-    if path_is_inside "$EXISTING_BIN" "$INSTALL_DIR" ||
-       path_is_inside "$EXISTING_BIN" "/opt/$BASE_APP_ID" ||
-       path_is_inside "$EXISTING_BIN" "$USER_HOME/.local/opt/$BASE_APP_ID" ||
-       path_is_inside "$EXISTING_BIN" "$USER_HOME/.local/opt/$BASE_APP_ID-local"; then
-        echo "[!] Warning: '$SYMLINK_NAME' also resolves to $EXISTING_BIN (another installation of this app). Whichever comes first in PATH will run."
+prompt_new_symlink_name() {
+    local new_name
+    while true; do
+        read -r -p "[?] Enter a different command name: " new_name
+        if [[ -z "$new_name" ]]; then
+            echo "[-] Name cannot be empty."
+        elif ! is_valid_name "$new_name"; then
+            echo "[-] Invalid name '$new_name' ($NAME_RULES)."
+        else
+            SYMLINK_NAME="$new_name"
+            SYMLINK_RENAMED=true
+            return 0
+        fi
+    done
+}
+
+lookup_command() {
+    if [[ $EUID -eq 0 ]]; then
+        sudo -u "$REAL_USER" bash -lc 'command -v -- "$1" || true' _ "$1" 2>/dev/null | tail -n 1 || true
     else
-        echo "[-] Error: The command '$SYMLINK_NAME' already exists at $EXISTING_BIN and wasn't installed by dopt for $APP_ID." >&2
-        echo "[-] Choose a different symlink name (manifest 'symlink_as' or the wizard prompt)." >&2
-        exit 1
+        command -v -- "$1" 2>/dev/null || true
     fi
+}
+
+SYMLINK_RENAMED=false
+while true; do
+    BIN_LINK="$BIN_LINK_DIR/$SYMLINK_NAME"
+
+    # The link path itself is taken by something that isn't ours: never overwrite it
+    if [[ -e "$BIN_LINK" || -L "$BIN_LINK" ]] &&
+       { [[ ! -L "$BIN_LINK" ]] || ! path_is_inside "$(readlink -- "$BIN_LINK")" "$INSTALL_DIR"; }; then
+        echo -e "\n[!] $BIN_LINK already exists and wasn't installed by dopt for $APP_ID."
+        [ "$FORCE_INSTALL" = true ] && abort_name_clash
+        echo "    1) Choose a different command name"
+        echo "    2) Abort"
+        read -r -p "[?] Choose an action [1-2] (default 1): " clash_res
+        case "${clash_res:-1}" in
+            1) prompt_new_symlink_name; continue ;;
+            *) abort_name_clash ;;
+        esac
+    fi
+
+    # The name exists elsewhere on PATH: the new link would shadow it (or be shadowed by it)
+    EXISTING_BIN=$(lookup_command "$SYMLINK_NAME")
+    if [[ "$EXISTING_BIN" == /* && "$EXISTING_BIN" != "$BIN_LINK" ]]; then
+        BASE_APP_ID="${APP_ID%-local}"
+        if path_is_inside "$EXISTING_BIN" "$INSTALL_DIR" ||
+           path_is_inside "$EXISTING_BIN" "/opt/$BASE_APP_ID" ||
+           path_is_inside "$EXISTING_BIN" "$USER_HOME/.local/opt/$BASE_APP_ID" ||
+           path_is_inside "$EXISTING_BIN" "$USER_HOME/.local/opt/$BASE_APP_ID-local"; then
+            echo "[!] Warning: '$SYMLINK_NAME' also resolves to $EXISTING_BIN (another installation of this app). Whichever comes first in PATH will run."
+        else
+            echo -e "\n[!] The command '$SYMLINK_NAME' already exists at $EXISTING_BIN and wasn't installed by dopt."
+            [ "$FORCE_INSTALL" = true ] && abort_name_clash
+            echo "    1) Choose a different command name"
+            echo "    2) Continue anyway (which '$SYMLINK_NAME' runs will depend on PATH order)"
+            echo "    3) Abort"
+            read -r -p "[?] Choose an action [1-3] (default 1): " clash_res
+            case "${clash_res:-1}" in
+                1) prompt_new_symlink_name; continue ;;
+                2) echo "[!] Continuing: $BIN_LINK will coexist with $EXISTING_BIN." ;;
+                *) abort_name_clash ;;
+            esac
+        fi
+    fi
+    break
+done
+
+SYMLINK_HINT=""
+if [[ -n "$SYMLINK_CLI" || "$SYMLINK_RENAMED" = true ]]; then
+    SYMLINK_HINT=" -s \"$SYMLINK_NAME\""
+fi
+if [[ "$SYMLINK_RENAMED" = true && -n "$MANIFEST" ]]; then
+    echo "[i] Tip: The manifest's 'symlink_as' doesn't match the name you chose. Update it, or pass -s \"$SYMLINK_NAME\" on future runs."
 fi
 
 if [[ -d "$INSTALL_DIR" ]]; then
@@ -421,9 +504,9 @@ cleanup_workspace() {
             echo "[!] To apply this update later without re-downloading, run:"
             [[ "$GLOBAL_INSTALL" = true ]] && SUDO_PREFIX="sudo " || SUDO_PREFIX=""
             if [[ -n "${MANIFEST:-}" && -f "${MANIFEST:-}" ]]; then
-                echo "    ${SUDO_PREFIX}./dopt.sh -m \"$MANIFEST\" -f \"$OUTPUT_DEST\""
+                echo "    ${SUDO_PREFIX}./dopt.sh -m \"$MANIFEST\" -f \"$OUTPUT_DEST\"${SYMLINK_HINT:-}"
             else
-                echo "    ${SUDO_PREFIX}./dopt.sh -a \"$APP_ID\" -f \"$OUTPUT_DEST\""
+                echo "    ${SUDO_PREFIX}./dopt.sh -a \"$APP_ID\" -f \"$OUTPUT_DEST\"${SYMLINK_HINT:-}"
             fi
         fi
     fi
@@ -573,9 +656,9 @@ if [[ ${#APP_PIDS[@]} -gt 0 ]]; then
             if [[ -n "$RESUME_FILE" ]]; then
                 echo -e "\n[!] To apply this update later without re-downloading, run:"
                 if [[ -n "$MANIFEST" && -f "$MANIFEST" ]]; then
-                    echo "    sudo ./dopt.sh -m \"$MANIFEST\" -f \"$RESUME_FILE\""
+                    echo "    sudo ./dopt.sh -m \"$MANIFEST\" -f \"$RESUME_FILE\"$SYMLINK_HINT"
                 else
-                    echo "    sudo ./dopt.sh -a \"$APP_ID\" -f \"$RESUME_FILE\""
+                    echo "    sudo ./dopt.sh -a \"$APP_ID\" -f \"$RESUME_FILE\"$SYMLINK_HINT"
                 fi
             fi
             exit 0
@@ -585,6 +668,7 @@ fi
 
 # Swap: live -> backup, staged -> live, then drop the backup. The exit trap restores the backup on failure.
 assert_managed_dir "$INSTALL_DIR"
+printf 'app_id=%s\n' "$APP_ID" > "$STAGE_DIR/$MARKER_NAME"
 echo "[*] Swapping in the new version to clear stale libraries..."
 if [[ -e "$INSTALL_DIR" ]]; then
     mv -- "$INSTALL_DIR" "$BACKUP_DIR"
@@ -635,11 +719,6 @@ if [[ "$CLI_ONLY" != "true" ]]; then
         ICON_PATH=$(find "$INSTALL_DIR" -maxdepth 5 -type d \( "${FIND_PRUNE_ARGS[@]}" \) -prune -o -type f \( -name "*.png" -o -name "*.svg" \) -print | head -n 1 || true)
     fi
 
-    DESKTOP_FILE="$DESKTOP_DIR/${APP_ID}.desktop"
-    if [[ -n "${LEGACY_DESKTOP_FILE:-}" && "$LEGACY_DESKTOP_FILE" != "$DESKTOP_FILE" ]]; then
-        echo "[*] Removing legacy desktop integration at $LEGACY_DESKTOP_FILE..."
-        rm -f "$LEGACY_DESKTOP_FILE"
-    fi
     echo "[*] Injecting desktop menu shell reference configuration at $DESKTOP_FILE..."
 
     cat << EOF > "$DESKTOP_FILE"
@@ -657,6 +736,10 @@ EOF
     echo "[+] Native Desktop integration verified."
 else
     echo "[*] App designated as CLI-only. Bypassing desktop shortcut layer."
+    if [[ -f "$DESKTOP_FILE" ]]; then
+        echo "[*] Removing previous desktop shortcut at $DESKTOP_FILE..."
+        rm -f -- "$DESKTOP_FILE"
+    fi
 fi
 
 # 9. Post-Execution cleanup hooks

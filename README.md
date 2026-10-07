@@ -14,7 +14,7 @@
 - **Graceful Aborts:** Any unexpected failure or cancellation post-download will automatically rescue the payload and generate a fast-resume command.
 - **Interactive Recovery:** If a local package scan fails, it doesn't just crash—it prompts you to dynamically provide a URL or exact path instead.
 - **Conflict Resolution:** Safely detects when you try to update a global app locally, offering to auto-escalate with `sudo` or safely isolate the new local desktop shortcut.
-- **Smart Updates:** When updating interactively, `dopt` reverse-engineers previous installations to auto-populate the setup wizard.
+- **Smart Updates:** When updating interactively, `dopt` reads the previous installation's command link and desktop shortcut to auto-populate the setup wizard.
 - **App Discovery:** If you forgot the App ID for an update, type `?` in the wizard to list all packages in your `/opt` folder.
 - **Flexible Deployments:** Install straight from a network URL, from a local archive file, or let `dopt` scan a directory for the latest matching version.
 
@@ -60,6 +60,7 @@ If you pass the `-g` or `--global` flag (which requires `sudo`), `dopt` installs
 **Manifest (Optional):**
 - `-m, --manifest <json>`: The path to the application manifest recipe.
 - `-a, --app-id <id>`: Provide the App ID directly if running without a manifest.
+- `-s, --symlink-as <name>`: The command name to link. Overrides the manifest's `symlink_as` and skips the wizard prompt.
 
 If no manifest is provided, `dopt` will launch an **Interactive Wizard** to guide you through the setup.
 
@@ -81,7 +82,14 @@ Because `dopt` does not maintain a complex internal database, updating an applic
 
 When you run `dopt` with a new `.tar.gz` payload, as long as the `app_id` matches the existing installation (either defined in the JSON manifest, passed via `-a`, or typed into the interactive prompt), `dopt` will replace the old installation with the new version. No special update flags are required!
 
-Updates are swapped in atomically: the new version is staged next to the old one and verified first, and if anything fails mid-update the previous installation is restored. `dopt` only ever installs into, and removes, `<opt dir>/<app_id>` (`~/.local/opt/<app_id>` or `/opt/<app_id>`). If the chosen command name already belongs to a program `dopt` didn't install (for example `git`, or a script in `~/.local/bin`), it aborts and asks you to pick a different name.
+Updates are swapped in atomically: the new version is staged next to the old one and verified first, and if anything fails mid-update the previous installation is restored. `dopt` only ever installs into, and replaces, `<opt dir>/<app_id>` (`~/.local/opt/<app_id>` or `/opt/<app_id>`).
+
+**Ownership:** every install contains a small `.dopt` marker file, which tells `dopt` the folder is its own:
+- Folders with the marker are upgraded normally.
+- Folders owned by a system package (RPM or deb) are never touched. `dopt` names the package and suggests either a different App ID (to install alongside it) or removing the package first.
+- Folders with neither (for example, installs made by older versions of `dopt`) trigger a one-time "Replace it?" prompt. With `-i`, `dopt` refuses instead of asking.
+
+**Command-name clashes:** `dopt` never overwrites a file in `~/.local/bin` or `/usr/local/bin` that it didn't create, and warns when the name already exists elsewhere on your `PATH` (for example `git`). You can pick a different name on the spot, continue anyway when the name only exists elsewhere on `PATH`, or abort. With `-i`, it aborts. Use `-s <name>` to set the name up front.
 
 If you are updating via the **Interactive Wizard**, `dopt` will intelligently scan your system for existing `.desktop` files and symlinks belonging to that App ID, and auto-populate all wizard prompts for a frictionless update experience. If you forgot the App ID you used previously, simply type `?` at the first prompt to see a list of all packages installed in your target installation directory (either `~/.local/opt` or `/opt`).
 
@@ -137,7 +145,7 @@ The manifest is a JSON file that defines the application parameters. See `exampl
 | `binary_path` | String | The exact relative path to the binary within the archive. Overrides `binary_pattern`. Required unless `binary_pattern` is set. |
 | `icon_path` | String | *(Optional)* The exact relative path or filename of the icon to use for the `.desktop` file. |
 | `cli_only` | Boolean/String | *(Optional)* Set to `true` if the application has no GUI. Prevents `.desktop` file creation. |
-| `symlink_as` | String | *(Optional)* The name of the command symlink created in `~/.local/bin` or `/usr/local/bin` (e.g., `myapp`). Defaults to `app_id`. |
+| `symlink_as` | String | *(Optional)* The name of the command symlink created in `~/.local/bin` or `/usr/local/bin` (e.g., `myapp`). Defaults to `app_id`. Can be overridden with `-s`. |
 | `categories` | String | *(Optional)* Categories for the `.desktop` file (e.g., `Utility;Development;`). Defaults to `Utility;`. |
 | `exec_flags` | String | *(Optional)* Default flags appended to the binary in the `.desktop` Exec line. |
 | `default_url_x64` | String | The URL to download the `x86_64` Linux tarball. |
